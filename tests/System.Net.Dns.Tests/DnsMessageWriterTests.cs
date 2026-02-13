@@ -1,0 +1,89 @@
+using System.Buffers;
+using System.Net;
+
+namespace System.Net.Dns.Tests;
+
+public class DnsMessageWriterTests
+{
+    [Fact]
+    public void WriteStandardAQuery_ProducesExpectedBytes()
+    {
+        // Expected wire format for: query example.com A IN, ID=0x1234, RD=1
+        byte[] expected =
+        [
+            // Header (12 bytes)
+            0x12, 0x34,  // ID
+            0x01, 0x00,  // Flags: RD=1
+            0x00, 0x01,  // QDCOUNT=1
+            0x00, 0x00,  // ANCOUNT=0
+            0x00, 0x00,  // NSCOUNT=0
+            0x00, 0x00,  // ARCOUNT=0
+            // Question: example.com A IN
+            0x07, (byte)'e', (byte)'x', (byte)'a', (byte)'m', (byte)'p', (byte)'l', (byte)'e',
+            0x03, (byte)'c', (byte)'o', (byte)'m', 0x00,
+            0x00, 0x01,  // QTYPE = A (1)
+            0x00, 0x01,  // QCLASS = IN (1)
+        ];
+
+        Span<byte> buffer = stackalloc byte[512];
+        var writer = new DnsMessageWriter(buffer);
+
+        var header = DnsMessageHeader.CreateStandardQuery(id: 0x1234);
+        Assert.True(writer.TryWriteHeader(in header));
+
+        Span<byte> nameBuffer = stackalloc byte[DnsName.MaxEncodedLength];
+        Assert.Equal(OperationStatus.Done,
+            DnsName.TryCreate("example.com", nameBuffer, out var name, out _));
+        Assert.True(writer.TryWriteQuestion(name, DnsRecordType.A));
+
+        Assert.Equal(expected.Length, writer.BytesWritten);
+        Assert.True(buffer[..writer.BytesWritten].SequenceEqual(expected));
+    }
+
+    [Fact]
+    public void WriteMultipleQuestions_ProducesCorrectOutput()
+    {
+        Span<byte> buffer = stackalloc byte[512];
+        var writer = new DnsMessageWriter(buffer);
+
+        var header = DnsMessageHeader.CreateStandardQuery(id: 1, questionCount: 2);
+        Assert.True(writer.TryWriteHeader(in header));
+
+        Span<byte> nameBuffer = stackalloc byte[DnsName.MaxEncodedLength];
+
+        DnsName.TryCreate("a.com", nameBuffer, out var name1, out _);
+        Assert.True(writer.TryWriteQuestion(name1, DnsRecordType.A));
+
+        DnsName.TryCreate("b.com", nameBuffer, out var name2, out _);
+        Assert.True(writer.TryWriteQuestion(name2, DnsRecordType.AAAA));
+
+        // Header(12) + Q1(1+1+3+1+3+1+4) + Q2 (same) = 12 + 11 + 11 = 34
+        // name "a.com" = \x01a\x03com\x00 = 7 bytes, + 4 type/class = 11
+        Assert.Equal(12 + 11 + 11, writer.BytesWritten);
+    }
+
+    [Fact]
+    public void BufferTooSmall_ForHeader_ReturnsFalse()
+    {
+        Span<byte> buffer = stackalloc byte[11]; // 1 short
+        var writer = new DnsMessageWriter(buffer);
+        var header = DnsMessageHeader.CreateStandardQuery(id: 1);
+        Assert.False(writer.TryWriteHeader(in header));
+        Assert.Equal(0, writer.BytesWritten);
+    }
+
+    [Fact]
+    public void BufferTooSmall_ForQuestion_ReturnsFalse()
+    {
+        Span<byte> buffer = stackalloc byte[14]; // header fits (12), question needs more
+        var writer = new DnsMessageWriter(buffer);
+
+        var header = DnsMessageHeader.CreateStandardQuery(id: 1);
+        Assert.True(writer.TryWriteHeader(in header));
+
+        Span<byte> nameBuffer = stackalloc byte[DnsName.MaxEncodedLength];
+        DnsName.TryCreate("example.com", nameBuffer, out var name, out _);
+        Assert.False(writer.TryWriteQuestion(name, DnsRecordType.A));
+        Assert.Equal(12, writer.BytesWritten); // only header was written
+    }
+}
