@@ -73,6 +73,35 @@ public class DnsMessageWriterTests
     }
 
     [Fact]
+    public void WriteQuestion_WithCompressedName_ExpandsPointers()
+    {
+        // Simulate a DnsName parsed from a response with a compression pointer
+        byte[] message =
+        [
+            7, (byte)'e', (byte)'x', (byte)'a', (byte)'m', (byte)'p', (byte)'l', (byte)'e',
+            3, (byte)'c', (byte)'o', (byte)'m', 0,
+            3, (byte)'w', (byte)'w', (byte)'w', 0xC0, 0x00 // www + pointer to example.com
+        ];
+        var compressedName = new DnsName(message, 13);
+
+        Span<byte> buffer = stackalloc byte[512];
+        var writer = new DnsMessageWriter(buffer);
+        var header = DnsMessageHeader.CreateStandardQuery(id: 1);
+        Assert.True(writer.TryWriteHeader(in header));
+        Assert.True(writer.TryWriteQuestion(compressedName, DnsRecordType.A));
+
+        // Parse the written message and verify the name was expanded
+        var reader = new DnsMessageReader(buffer[..writer.BytesWritten]);
+        Assert.True(reader.TryReadQuestion(out var q));
+        Assert.True(q.Name.Equals("www.example.com"));
+
+        // Verify no compression pointers in the output (flat encoding)
+        // The name should be: \x03www\x07example\x03com\x00 = 17 bytes
+        // Total: 12 header + 17 name + 4 type/class = 33
+        Assert.Equal(33, writer.BytesWritten);
+    }
+
+    [Fact]
     public void BufferTooSmall_ForQuestion_ReturnsFalse()
     {
         Span<byte> buffer = stackalloc byte[14]; // header fits (12), question needs more
