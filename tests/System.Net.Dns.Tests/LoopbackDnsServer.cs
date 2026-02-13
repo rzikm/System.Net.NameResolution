@@ -67,6 +67,86 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     }
 
     /// <summary>
+    /// Convenience: adds SRV records with optional additional A/AAAA records.
+    /// </summary>
+    public void AddSrvRecords(string name, (string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses)[] entries)
+    {
+        AddResponse(name, DnsRecordType.SRV, (queryId, qName) =>
+            BuildSrvResponse(queryId, qName, entries));
+    }
+
+    private static byte[] BuildSrvResponse(ushort queryId, byte[] questionName,
+        (string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses)[] entries)
+    {
+        using var ms = new MemoryStream();
+
+        // Count additional A/AAAA records
+        int additionalCount = 0;
+        foreach (var e in entries)
+            if (e.Addresses != null)
+                additionalCount += e.Addresses.Length;
+
+        // Header
+        WriteUInt16BE(ms, queryId);
+        WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
+        WriteUInt16BE(ms, 1); // QDCOUNT
+        WriteUInt16BE(ms, (ushort)entries.Length); // ANCOUNT
+        WriteUInt16BE(ms, 0); // NSCOUNT
+        WriteUInt16BE(ms, (ushort)additionalCount); // ARCOUNT
+
+        // Question echo
+        ms.Write(questionName);
+        WriteUInt16BE(ms, (ushort)DnsRecordType.SRV);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+
+        // SRV answer records
+        foreach (var e in entries)
+        {
+            // Name: pointer to question name
+            ms.WriteByte(0xC0);
+            ms.WriteByte(0x0C);
+            WriteUInt16BE(ms, (ushort)DnsRecordType.SRV);
+            WriteUInt16BE(ms, 1); // CLASS=IN
+            WriteUInt32BE(ms, e.Ttl);
+
+            byte[] targetBytes = EncodeName(e.Target);
+            WriteUInt16BE(ms, (ushort)(6 + targetBytes.Length)); // RDLENGTH: priority(2)+weight(2)+port(2)+target
+            WriteUInt16BE(ms, e.Priority);
+            WriteUInt16BE(ms, e.Weight);
+            WriteUInt16BE(ms, e.Port);
+            ms.Write(targetBytes);
+        }
+
+        // Additional section: A/AAAA records for targets
+        foreach (var e in entries)
+        {
+            if (e.Addresses == null) continue;
+            byte[] targetNameBytes = EncodeName(e.Target);
+            foreach (var addr in e.Addresses)
+            {
+                ms.Write(targetNameBytes);
+                var addrType = addr.AddressFamily == AddressFamily.InterNetworkV6
+                    ? DnsRecordType.AAAA : DnsRecordType.A;
+                WriteUInt16BE(ms, (ushort)addrType);
+                WriteUInt16BE(ms, 1); // CLASS=IN
+                WriteUInt32BE(ms, e.Ttl);
+                byte[] addrBytes = addr.GetAddressBytes();
+                WriteUInt16BE(ms, (ushort)addrBytes.Length);
+                ms.Write(addrBytes);
+            }
+        }
+
+        return ms.ToArray();
+    }
+
+    private static byte[] EncodeName(string name)
+    {
+        Span<byte> buf = stackalloc byte[DnsName.MaxEncodedLength];
+        DnsName.TryCreate(name, buf, out _, out int written);
+        return buf[..written].ToArray();
+    }
+
+    /// <summary>
     /// Convenience: adds a custom response builder for full control.
     /// </summary>
     public delegate byte[] ResponseBuilder(ushort queryId, byte[] questionName);
