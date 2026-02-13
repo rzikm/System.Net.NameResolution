@@ -239,9 +239,10 @@ public readonly ref struct DnsName
             byte b = _buffer[pos];
             if (b == 0) return pos + 1 - _offset; // root label
             if ((b & 0xC0) == 0xC0) return pos + 2 - _offset; // compression pointer
+            if (pos + 1 + b > _buffer.Length) break; // malformed: label extends past buffer
             pos += 1 + b; // skip label
         }
-        return pos - _offset; // shouldn't happen with valid data
+        return -1; // malformed name
     }
 
     private static bool AsciiEqualsIgnoreCase(byte a, byte b)
@@ -293,6 +294,7 @@ public ref struct DnsLabelEnumerator
                 // Compression pointer: 2 bytes, upper 2 bits are 11
                 if (_pos + 1 >= _buffer.Length) return false;
                 int pointer = ((b & 0x3F) << 8) | _buffer[_pos + 1];
+                if (pointer >= _buffer.Length) return false; // invalid pointer target
                 _pos = pointer;
                 if (++hops > MaxPointerHops) return false; // loop protection
                 continue;

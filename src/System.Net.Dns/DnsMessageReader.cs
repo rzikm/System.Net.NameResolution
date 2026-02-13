@@ -88,6 +88,7 @@ public ref struct DnsMessageReader
         // Read name
         var name = new DnsName(_message, _pos);
         int nameWireLen = name.GetWireLength();
+        if (nameWireLen < 0) return false; // malformed name
         _pos += nameWireLen;
 
         // Read QTYPE (2) + QCLASS (2) = 4 bytes
@@ -116,6 +117,7 @@ public ref struct DnsMessageReader
         // Read name
         var name = new DnsName(_message, _pos);
         int nameWireLen = name.GetWireLength();
+        if (nameWireLen < 0) return false; // malformed name
         _pos += nameWireLen;
 
         // Read TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) = 10 bytes

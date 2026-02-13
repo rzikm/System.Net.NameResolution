@@ -208,6 +208,41 @@ public class DnsMessageReaderTests
     }
 
     [Fact]
+    public void TryReadQuestion_MalformedLabelLength_ReturnsFalse()
+    {
+        // Craft a message where the question name has a label length extending past buffer
+        byte[] malformed =
+        [
+            0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // header
+            0xFF, // label length = 255, but no data follows
+        ];
+        var reader = new DnsMessageReader(malformed);
+        Assert.False(reader.TryReadQuestion(out _));
+    }
+
+    [Fact]
+    public void TryReadRecord_InvalidCompressionPointer_ReturnsFalse()
+    {
+        // Craft a message where a record name has a compression pointer to an out-of-bounds offset
+        byte[] malformed =
+        [
+            0x00, 0x01, 0x81, 0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, // header: ANCOUNT=1
+            0xC0, 0xFF, // compression pointer to offset 255, way beyond buffer
+            0x00, 0x01, // TYPE=A
+            0x00, 0x01, // CLASS=IN
+            0x00, 0x00, 0x00, 0x3C, // TTL=60
+            0x00, 0x04, // RDLENGTH=4
+            0x01, 0x02, 0x03, 0x04, // RDATA
+        ];
+        var reader = new DnsMessageReader(malformed);
+        // The record can be read structurally (pointer is just 2 bytes to skip)
+        Assert.True(reader.TryReadRecord(out var record));
+        // But the name's labels cannot be enumerated
+        var enumerator = record.Name.EnumerateLabels();
+        Assert.False(enumerator.MoveNext());
+    }
+
+    [Fact]
     public void RoundTrip_WriteThenRead()
     {
         // Build a query with the writer, then parse it with the reader

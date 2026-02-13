@@ -173,7 +173,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
 
     private async Task<byte[]> SendUdpQueryAsync(byte[] query, IPEndPoint server, CancellationToken ct)
     {
-        using var udp = new UdpClient();
+        using var udp = new UdpClient(server.AddressFamily);
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(_options.Timeout);
 
