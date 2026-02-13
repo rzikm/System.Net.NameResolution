@@ -245,4 +245,50 @@ public class DnsNameTests
         var name = new DnsName(message, 13);
         Assert.Equal(6, name.GetWireLength());
     }
+
+    [Fact]
+    public void CompressionPointer_SelfReferencing_StopsEnumeration()
+    {
+        // Pointer at offset 0 that points to itself
+        byte[] message = [0xC0, 0x00];
+        var name = new DnsName(message, 0);
+        // Should not infinite-loop; max hop limit kicks in
+        var labels = new List<string>();
+        foreach (var label in name.EnumerateLabels())
+            labels.Add(Encoding.ASCII.GetString(label));
+        // Enumerator returns false after max hops
+        Assert.Empty(labels);
+    }
+
+    [Fact]
+    public void CompressionPointer_ForwardPointer_HandledByMaxHops()
+    {
+        // Pointer at offset 0 that points forward to offset 2 (past itself, but within buffer)
+        // Offset 2 has another pointer back to offset 0 → loop
+        byte[] message = [0xC0, 0x02, 0xC0, 0x00];
+        var name = new DnsName(message, 0);
+        var labels = new List<string>();
+        foreach (var label in name.EnumerateLabels())
+            labels.Add(Encoding.ASCII.GetString(label));
+        Assert.Empty(labels);
+    }
+
+    [Fact]
+    public void CompressionPointer_ChainedPointers_StopsAtMaxHops()
+    {
+        // Multiple pointers chaining: offset 0 → offset 2 → offset 4 → root
+        byte[] message = [0xC0, 0x02, 0xC0, 0x04, 0x01, (byte)'a', 0x00];
+        var name = new DnsName(message, 0);
+        Assert.True(name.Equals("a"));
+    }
+
+    [Fact]
+    public void CompressionPointer_OutOfBounds_ReturnsFalse()
+    {
+        // Pointer to offset 0xFF, far beyond the 4-byte buffer
+        byte[] message = [0xC0, 0xFF, 0x00, 0x00];
+        var name = new DnsName(message, 0);
+        var enumerator = name.EnumerateLabels();
+        Assert.False(enumerator.MoveNext());
+    }
 }

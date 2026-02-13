@@ -142,6 +142,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     {
         // Build query message
         byte[] queryBytes = BuildQuery(name, type);
+        ushort queryId = System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(queryBytes);
 
         var servers = GetServers();
         if (servers.Count == 0)
@@ -155,7 +156,28 @@ public class DnsResolver : IAsyncDisposable, IDisposable
             {
                 try
                 {
-                    return await SendUdpQueryAsync(queryBytes, server, ct);
+                    byte[] response = await SendUdpQueryAsync(queryBytes, server, ct);
+
+                    // Validate transaction ID matches
+                    if (response.Length >= 2)
+                    {
+                        ushort responseId = System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(response);
+                        if (responseId != queryId)
+                            continue; // ignore mismatched response, retry
+                    }
+
+                    // Check for retriable server errors
+                    if (response.Length >= 4)
+                    {
+                        var rcode = (DnsResponseCode)(response[3] & 0xF);
+                        if (rcode == DnsResponseCode.ServerFailure)
+                        {
+                            lastException = new InvalidOperationException($"DNS server returned {rcode}");
+                            continue; // retry
+                        }
+                    }
+
+                    return response;
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {

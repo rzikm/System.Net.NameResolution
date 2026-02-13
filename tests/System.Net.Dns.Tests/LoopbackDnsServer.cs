@@ -14,8 +14,12 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _listenTask;
     private readonly Dictionary<(string Name, DnsRecordType Type), ResponseBuilder> _responses = new();
+    private int _requestCount;
 
     public IPEndPoint EndPoint { get; }
+
+    /// <summary>Number of requests received so far.</summary>
+    public int RequestCount => _requestCount;
 
     private LoopbackDnsServer(UdpClient udp, IPEndPoint endPoint)
     {
@@ -64,6 +68,32 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     {
         AddResponse(name, type, (queryId, qName) =>
             BuildErrorResponse(queryId, qName, type, DnsResponseCode.NameError));
+    }
+
+    /// <summary>
+    /// Convenience: adds a CNAME + A response (alias chain).
+    /// </summary>
+    public void AddCNameAndARecord(string name, string cname, IPAddress address, uint ttl = 300)
+    {
+        AddResponse(name, DnsRecordType.A, (queryId, qName) =>
+            BuildCNameAndAResponse(queryId, qName, cname, address, ttl));
+    }
+
+    /// <summary>
+    /// Adds a response that drops the packet (no reply), causing a timeout.
+    /// </summary>
+    public void AddDrop(string name, DnsRecordType type)
+    {
+        AddResponse(name, type, (_, _) => []);
+    }
+
+    /// <summary>
+    /// Adds a ServerFailure response.
+    /// </summary>
+    public void AddServerFailure(string name, DnsRecordType type)
+    {
+        AddResponse(name, type, (queryId, qName) =>
+            BuildErrorResponse(queryId, qName, type, DnsResponseCode.ServerFailure));
     }
 
     /// <summary>
@@ -160,9 +190,11 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
                 var result = await _udp.ReceiveAsync(ct);
                 var query = result.Buffer;
                 var remote = result.RemoteEndPoint;
+                Interlocked.Increment(ref _requestCount);
 
                 byte[] response = ProcessQuery(query);
-                await _udp.SendAsync(response, remote, ct);
+                if (response.Length > 0)
+                    await _udp.SendAsync(response, remote, ct);
             }
         }
         catch (OperationCanceledException) { }
@@ -236,6 +268,47 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         WriteUInt32BE(ms, ttl);
         WriteUInt16BE(ms, (ushort)rdata.Length);
         ms.Write(rdata);
+
+        return ms.ToArray();
+    }
+
+    internal static byte[] BuildCNameAndAResponse(ushort queryId, byte[] questionName,
+        string cname, IPAddress address, uint ttl)
+    {
+        byte[] cnameEncoded = EncodeName(cname);
+        byte[] addrBytes = address.GetAddressBytes();
+        var addrType = address.AddressFamily == AddressFamily.InterNetworkV6
+            ? DnsRecordType.AAAA : DnsRecordType.A;
+
+        using var ms = new MemoryStream();
+        // Header
+        WriteUInt16BE(ms, queryId);
+        WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
+        WriteUInt16BE(ms, 1); // QDCOUNT
+        WriteUInt16BE(ms, 2); // ANCOUNT (CNAME + A)
+        WriteUInt16BE(ms, 0); // NSCOUNT
+        WriteUInt16BE(ms, 0); // ARCOUNT
+
+        // Question echo
+        ms.Write(questionName);
+        WriteUInt16BE(ms, (ushort)addrType);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+
+        // Answer 1: CNAME
+        ms.WriteByte(0xC0); ms.WriteByte(0x0C); // pointer to question name
+        WriteUInt16BE(ms, (ushort)DnsRecordType.CNAME);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+        WriteUInt32BE(ms, ttl);
+        WriteUInt16BE(ms, (ushort)cnameEncoded.Length);
+        ms.Write(cnameEncoded);
+
+        // Answer 2: A/AAAA for the CNAME target
+        ms.Write(cnameEncoded);
+        WriteUInt16BE(ms, (ushort)addrType);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+        WriteUInt32BE(ms, ttl);
+        WriteUInt16BE(ms, (ushort)addrBytes.Length);
+        ms.Write(addrBytes);
 
         return ms.ToArray();
     }
