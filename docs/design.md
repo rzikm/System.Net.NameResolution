@@ -385,11 +385,13 @@ public readonly ref struct DnsRecord
 ```
 
 > **Alternative design considered**: Instead of exposing `Message` and `DataOffset`, provide a helper method on `DnsRecord` for the specific need of resolving domain names within RDATA:
+>
 > ```csharp
 > // Reads a domain name at the given byte offset within this record's RDATA.
 > // Handles compression pointers using the underlying message context.
 > public bool TryReadName(int rdataOffset, out DnsName name, out int bytesConsumed);
 > ```
+>
 > This would be more encapsulated — users wouldn't need to understand message-level offsets and compression — but less flexible for arbitrary custom parsing. We chose to expose the raw context since the target audience (low-level DNS users) already understands the wire format.
 
 ### Typed Record Data Accessors
@@ -555,6 +557,7 @@ The high-level API provides an instance-based, async, TTL-aware DNS resolver. It
 Result types are regular structs (heap-safe, usable across `await` boundaries). Each result carries a `DateTimeOffset ExpiresAt` computed from the wire TTL at the time the response was received.
 
 High-level methods return `DnsResult<T>`, a generic wrapper that carries the DNS response code alongside the resolved records. This allows callers to distinguish between:
+
 - **Success**: `ResponseCode == NoError`, `Records` is non-empty
 - **NODATA**: `ResponseCode == NoError`, `Records` is empty (name exists but has no records of the requested type)
 - **NXDOMAIN**: `ResponseCode == NameError`, `Records` is empty (name does not exist)
@@ -572,14 +575,16 @@ public readonly struct DnsResult<T>
     // Resolved records. Empty on error or NODATA.
     public T[] Records { get; }
 
-    // For negative responses, the expiration time derived from the SOA minimum TTL
+    // For (external) caching of negative responses, the expiration time derived from the SOA minimum TTL
     // in the authority section. Null if no SOA was present or the response was successful.
+    // Alternative: int NegativeCacheTtl
     public DateTimeOffset? NegativeCacheExpiresAt { get; }
 }
 
 public readonly struct DnsResolvedAddress
 {
     public IPAddress Address { get; }
+    // Alternative: int Ttl
     public DateTimeOffset ExpiresAt { get; }
 }
 
@@ -589,6 +594,8 @@ public readonly struct DnsResolvedService
     public ushort Port { get; }
     public ushort Priority { get; }
     public ushort Weight { get; }
+
+    // Alternative: int Ttl
     public DateTimeOffset ExpiresAt { get; }
 
     // Addresses from the additional section of the SRV response, if present.
