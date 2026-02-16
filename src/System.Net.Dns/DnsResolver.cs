@@ -310,15 +310,14 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         ReadOnlyMemory<byte> query, IPEndPoint server,
         byte[] responseBuffer, CancellationToken ct)
     {
-        using UdpClient udp = new UdpClient(server.AddressFamily);
+        using Socket socket = new Socket(server.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
         using CancellationTokenSource timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(_options.Timeout);
 
-        await udp.SendAsync(query, server, timeoutCts.Token);
-        UdpReceiveResult result = await udp.ReceiveAsync(timeoutCts.Token);
-
-        result.Buffer.CopyTo(responseBuffer, 0);
-        return result.Buffer.Length;
+        await socket.SendToAsync(query, SocketFlags.None, server, timeoutCts.Token);
+        SocketReceiveFromResult result = await socket.ReceiveFromAsync(
+            responseBuffer, SocketFlags.None, server, timeoutCts.Token);
+        return result.ReceivedBytes;
     }
 
     private IReadOnlyList<IPEndPoint> GetServers()
