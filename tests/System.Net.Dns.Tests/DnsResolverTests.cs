@@ -15,7 +15,11 @@ public class DnsResolverTests : IAsyncLifetime
         _server.AddAAAARecord("host.test", IPAddress.Parse("fd00::1"), ttl: 60);
         _server.AddARecord("v4only.test", IPAddress.Parse("10.0.0.2"), ttl: 300);
         _server.AddNxDomain("v4only.test", DnsRecordType.AAAA);
-        _server.AddNxDomain("missing.test", DnsRecordType.A);
+        _server.AddNxDomainWithSoa("missing.test", DnsRecordType.A, soaMinTtl: 120);
+
+        // NODATA: name exists (has A) but no AAAA
+        _server.AddARecord("noaaaa.test", IPAddress.Parse("10.0.0.3"), ttl: 300);
+        _server.AddNoData("noaaaa.test", DnsRecordType.AAAA, soaMinTtl: 30);
 
         _server.AddSrvRecords("_http._tcp.svc.test",
         [
@@ -47,73 +51,120 @@ public class DnsResolverTests : IAsyncLifetime
     [Fact]
     public async Task ResolveAddresses_Unspecified_ReturnsBothV4AndV6()
     {
-        var addresses = await _resolver.ResolveAddressesAsync("host.test");
+        var result = await _resolver.ResolveAddressesAsync("host.test");
 
-        Assert.Equal(2, addresses.Length);
-        Assert.Contains(addresses, a => a.Address.ToString() == "10.0.0.1");
-        Assert.Contains(addresses, a => a.Address.ToString() == "fd00::1");
+        Assert.Equal(DnsResponseCode.NoError, result.ResponseCode);
+        Assert.Equal(2, result.Records.Length);
+        Assert.Contains(result.Records, a => a.Address.ToString() == "10.0.0.1");
+        Assert.Contains(result.Records, a => a.Address.ToString() == "fd00::1");
     }
 
     [Fact]
     public async Task ResolveAddresses_IPv4Only()
     {
-        var addresses = await _resolver.ResolveAddressesAsync("host.test", AddressFamily.InterNetwork);
+        var result = await _resolver.ResolveAddressesAsync("host.test", AddressFamily.InterNetwork);
 
-        Assert.Single(addresses);
-        Assert.Equal("10.0.0.1", addresses[0].Address.ToString());
+        Assert.Single(result.Records);
+        Assert.Equal("10.0.0.1", result.Records[0].Address.ToString());
     }
 
     [Fact]
     public async Task ResolveAddresses_IPv6Only()
     {
-        var addresses = await _resolver.ResolveAddressesAsync("host.test", AddressFamily.InterNetworkV6);
+        var result = await _resolver.ResolveAddressesAsync("host.test", AddressFamily.InterNetworkV6);
 
-        Assert.Single(addresses);
-        Assert.Equal("fd00::1", addresses[0].Address.ToString());
+        Assert.Single(result.Records);
+        Assert.Equal("fd00::1", result.Records[0].Address.ToString());
     }
 
     [Fact]
     public async Task ResolveAddresses_V4OnlyHost_ReturnsOnlyV4()
     {
-        var addresses = await _resolver.ResolveAddressesAsync("v4only.test");
+        var result = await _resolver.ResolveAddressesAsync("v4only.test");
 
-        Assert.Single(addresses);
-        Assert.Equal("10.0.0.2", addresses[0].Address.ToString());
+        // A succeeds, AAAA returns NXDOMAIN — but since we got addresses, overall is success
+        Assert.Equal(DnsResponseCode.NoError, result.ResponseCode);
+        Assert.Single(result.Records);
+        Assert.Equal("10.0.0.2", result.Records[0].Address.ToString());
     }
 
     [Fact]
-    public async Task ResolveAddresses_Nxdomain_ReturnsEmpty()
+    public async Task ResolveAddresses_Nxdomain_ReturnsNameError()
     {
-        var addresses = await _resolver.ResolveAddressesAsync("missing.test");
-        Assert.Empty(addresses);
+        var result = await _resolver.ResolveAddressesAsync("missing.test");
+
+        Assert.Equal(DnsResponseCode.NameError, result.ResponseCode);
+        Assert.Empty(result.Records);
+    }
+
+    [Fact]
+    public async Task ResolveAddresses_Nxdomain_HasNegativeCacheTtl()
+    {
+        var before = DateTimeOffset.UtcNow;
+        var result = await _resolver.ResolveAddressesAsync("missing.test", AddressFamily.InterNetwork);
+        var after = DateTimeOffset.UtcNow;
+
+        Assert.Equal(DnsResponseCode.NameError, result.ResponseCode);
+        Assert.NotNull(result.NegativeCacheExpiresAt);
+        // SOA minimum TTL is 120s
+        Assert.True(result.NegativeCacheExpiresAt >= before + TimeSpan.FromSeconds(119));
+        Assert.True(result.NegativeCacheExpiresAt <= after + TimeSpan.FromSeconds(121));
+    }
+
+    [Fact]
+    public async Task ResolveAddresses_NoData_ReturnsNoErrorWithEmptyRecords()
+    {
+        // noaaaa.test exists (has A record) but has no AAAA → NODATA
+        var result = await _resolver.ResolveAddressesAsync("noaaaa.test", AddressFamily.InterNetworkV6);
+
+        Assert.Equal(DnsResponseCode.NoError, result.ResponseCode);
+        Assert.Empty(result.Records);
+    }
+
+    [Fact]
+    public async Task ResolveAddresses_NoData_Vs_Nxdomain_Distinguishable()
+    {
+        // NODATA: name exists, no records of requested type → NoError + empty
+        var nodata = await _resolver.ResolveAddressesAsync("noaaaa.test", AddressFamily.InterNetworkV6);
+        Assert.Equal(DnsResponseCode.NoError, nodata.ResponseCode);
+        Assert.Empty(nodata.Records);
+
+        // NXDOMAIN: name doesn't exist → NameError + empty
+        var nxdomain = await _resolver.ResolveAddressesAsync("missing.test", AddressFamily.InterNetwork);
+        Assert.Equal(DnsResponseCode.NameError, nxdomain.ResponseCode);
+        Assert.Empty(nxdomain.Records);
+
+        // They are distinguishable via ResponseCode
+        Assert.NotEqual(nodata.ResponseCode, nxdomain.ResponseCode);
     }
 
     [Fact]
     public async Task ResolveAddresses_HasExpiration()
     {
         var before = DateTimeOffset.UtcNow;
-        var addresses = await _resolver.ResolveAddressesAsync("host.test", AddressFamily.InterNetwork);
+        var result = await _resolver.ResolveAddressesAsync("host.test", AddressFamily.InterNetwork);
         var after = DateTimeOffset.UtcNow;
 
-        Assert.Single(addresses);
+        Assert.Single(result.Records);
         // TTL is 120s, so ExpiresAt should be ~120s from now
-        Assert.True(addresses[0].ExpiresAt >= before + TimeSpan.FromSeconds(119));
-        Assert.True(addresses[0].ExpiresAt <= after + TimeSpan.FromSeconds(121));
+        Assert.True(result.Records[0].ExpiresAt >= before + TimeSpan.FromSeconds(119));
+        Assert.True(result.Records[0].ExpiresAt <= after + TimeSpan.FromSeconds(121));
     }
 
     [Fact]
     public async Task ResolveService_ReturnsSrvRecords()
     {
-        var services = await _resolver.ResolveServiceAsync("_http._tcp.svc.test");
+        var result = await _resolver.ResolveServiceAsync("_http._tcp.svc.test");
 
-        Assert.Equal(2, services.Length);
+        Assert.Equal(DnsResponseCode.NoError, result.ResponseCode);
+        Assert.Equal(2, result.Records.Length);
 
-        var s1 = Assert.Single(services, s => s.Target == "node1.test");
+        var s1 = Assert.Single(result.Records, s => s.Target == "node1.test");
         Assert.Equal(8080, s1.Port);
         Assert.Equal(10, s1.Priority);
         Assert.Equal(100, s1.Weight);
 
-        var s2 = Assert.Single(services, s => s.Target == "node2.test");
+        var s2 = Assert.Single(result.Records, s => s.Target == "node2.test");
         Assert.Equal(8081, s2.Port);
         Assert.Equal(20, s2.Priority);
     }
@@ -121,14 +172,14 @@ public class DnsResolverTests : IAsyncLifetime
     [Fact]
     public async Task ResolveService_IncludesAdditionalAddresses()
     {
-        var services = await _resolver.ResolveServiceAsync("_http._tcp.svc.test");
+        var result = await _resolver.ResolveServiceAsync("_http._tcp.svc.test");
 
-        var s1 = Assert.Single(services, s => s.Target == "node1.test");
+        var s1 = Assert.Single(result.Records, s => s.Target == "node1.test");
         Assert.NotNull(s1.Addresses);
         Assert.Single(s1.Addresses);
         Assert.Equal("10.0.0.10", s1.Addresses[0].Address.ToString());
 
-        var s2 = Assert.Single(services, s => s.Target == "node2.test");
+        var s2 = Assert.Single(result.Records, s => s.Target == "node2.test");
         Assert.NotNull(s2.Addresses);
         Assert.Equal(2, s2.Addresses.Length);
     }
@@ -136,11 +187,11 @@ public class DnsResolverTests : IAsyncLifetime
     [Fact]
     public async Task ResolveService_NoAdditionalAddresses()
     {
-        var services = await _resolver.ResolveServiceAsync("_noadd._tcp.svc.test");
+        var result = await _resolver.ResolveServiceAsync("_noadd._tcp.svc.test");
 
-        Assert.Single(services);
-        Assert.Equal("noaddr.test", services[0].Target);
-        Assert.Null(services[0].Addresses);
+        Assert.Single(result.Records);
+        Assert.Equal("noaddr.test", result.Records[0].Target);
+        Assert.Null(result.Records[0].Addresses);
     }
 
     [Fact]

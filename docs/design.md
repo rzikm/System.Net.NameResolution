@@ -554,8 +554,28 @@ The high-level API provides an instance-based, async, TTL-aware DNS resolver. It
 
 Result types are regular structs (heap-safe, usable across `await` boundaries). Each result carries a `DateTimeOffset ExpiresAt` computed from the wire TTL at the time the response was received.
 
+High-level methods return `DnsResult<T>`, a generic wrapper that carries the DNS response code alongside the resolved records. This allows callers to distinguish between:
+- **Success**: `ResponseCode == NoError`, `Records` is non-empty
+- **NODATA**: `ResponseCode == NoError`, `Records` is empty (name exists but has no records of the requested type)
+- **NXDOMAIN**: `ResponseCode == NameError`, `Records` is empty (name does not exist)
+
+For negative responses (NXDOMAIN/NODATA), `NegativeCacheExpiresAt` is populated from the SOA minimum TTL in the authority section (per RFC 2308 §5), enabling callers to cache negative results.
+
 ```csharp
 namespace System.Net;
+
+public readonly struct DnsResult<T>
+{
+    // The DNS response code.
+    public DnsResponseCode ResponseCode { get; }
+
+    // Resolved records. Empty on error or NODATA.
+    public T[] Records { get; }
+
+    // For negative responses, the expiration time derived from the SOA minimum TTL
+    // in the authority section. Null if no SOA was present or the response was successful.
+    public DateTimeOffset? NegativeCacheExpiresAt { get; }
+}
 
 public readonly struct DnsResolvedAddress
 {
@@ -593,13 +613,13 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     // High-level: hostname → addresses with TTL.
     // AddressFamily.Unspecified queries both A and AAAA.
     // Respects hosts file unless disabled in options.
-    public Task<DnsResolvedAddress[]> ResolveAddressesAsync(
+    public Task<DnsResult<DnsResolvedAddress>> ResolveAddressesAsync(
         string hostName,
         AddressFamily addressFamily = AddressFamily.Unspecified,
         CancellationToken cancellationToken = default);
 
     // High-level: SRV record lookup for service discovery.
-    public Task<DnsResolvedService[]> ResolveServiceAsync(
+    public Task<DnsResult<DnsResolvedService>> ResolveServiceAsync(
         string serviceName,
         CancellationToken cancellationToken = default);
 

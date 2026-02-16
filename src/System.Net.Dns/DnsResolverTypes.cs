@@ -1,6 +1,38 @@
 namespace System.Net;
 
 /// <summary>
+/// Generic result type for high-level DNS resolution methods.
+/// Carries the response code, resolved records, and negative cache information.
+/// </summary>
+public readonly struct DnsResult<T>
+{
+    /// <summary>
+    /// The DNS response code. Use this to distinguish between:
+    /// - NoError + non-empty Records = successful resolution
+    /// - NoError + empty Records = NODATA (name exists but no records of requested type)
+    /// - NameError + empty Records = NXDOMAIN (name does not exist)
+    /// </summary>
+    public DnsResponseCode ResponseCode { get; }
+
+    /// <summary>Resolved records. Empty on error or NODATA.</summary>
+    public T[] Records { get; }
+
+    /// <summary>
+    /// For negative responses (NXDOMAIN/NODATA), the expiration time derived from the
+    /// SOA minimum TTL in the authority section. Callers can cache the negative result
+    /// until this time. Null if no SOA was present or the response was successful.
+    /// </summary>
+    public DateTimeOffset? NegativeCacheExpiresAt { get; }
+
+    public DnsResult(DnsResponseCode responseCode, T[] records, DateTimeOffset? negativeCacheExpiresAt = null)
+    {
+        ResponseCode = responseCode;
+        Records = records;
+        NegativeCacheExpiresAt = negativeCacheExpiresAt;
+    }
+}
+
+/// <summary>
 /// Address resolved from DNS with TTL-derived expiration.
 /// </summary>
 public readonly struct DnsResolvedAddress

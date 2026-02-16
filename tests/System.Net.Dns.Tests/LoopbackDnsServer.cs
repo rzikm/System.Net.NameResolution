@@ -97,6 +97,24 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     }
 
     /// <summary>
+    /// Adds a NODATA response (NoError with zero answers, SOA in authority section).
+    /// </summary>
+    public void AddNoData(string name, DnsRecordType type, string soaName = "test", uint soaMinTtl = 60)
+    {
+        AddResponse(name, type, (queryId, qName) =>
+            BuildNoDataResponse(queryId, qName, type, soaName, soaMinTtl));
+    }
+
+    /// <summary>
+    /// Adds an NXDOMAIN response with a SOA record in the authority section.
+    /// </summary>
+    public void AddNxDomainWithSoa(string name, DnsRecordType type, string soaName = "test", uint soaMinTtl = 60)
+    {
+        AddResponse(name, type, (queryId, qName) =>
+            BuildNxDomainWithSoaResponse(queryId, qName, type, soaName, soaMinTtl));
+    }
+
+    /// <summary>
     /// Convenience: adds SRV records with optional additional A/AAAA records.
     /// </summary>
     public void AddSrvRecords(string name, (string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses)[] entries)
@@ -332,6 +350,58 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
             WriteUInt16BE(ms, (ushort)type);
             WriteUInt16BE(ms, 1); // CLASS=IN
         }
+
+        return ms.ToArray();
+    }
+
+    private static byte[] BuildNoDataResponse(ushort queryId, byte[] questionName,
+        DnsRecordType type, string soaName, uint soaMinTtl)
+    {
+        return BuildResponseWithSoa(queryId, questionName, type, DnsResponseCode.NoError, soaName, soaMinTtl);
+    }
+
+    private static byte[] BuildNxDomainWithSoaResponse(ushort queryId, byte[] questionName,
+        DnsRecordType type, string soaName, uint soaMinTtl)
+    {
+        return BuildResponseWithSoa(queryId, questionName, type, DnsResponseCode.NameError, soaName, soaMinTtl);
+    }
+
+    private static byte[] BuildResponseWithSoa(ushort queryId, byte[] questionName,
+        DnsRecordType type, DnsResponseCode rcode, string soaName, uint soaMinTtl)
+    {
+        using var ms = new MemoryStream();
+        ushort flags = (ushort)(0x8180 | (ushort)rcode);
+        WriteUInt16BE(ms, queryId);
+        WriteUInt16BE(ms, flags);
+        WriteUInt16BE(ms, 1); // QDCOUNT
+        WriteUInt16BE(ms, 0); // ANCOUNT
+        WriteUInt16BE(ms, 1); // NSCOUNT (SOA)
+        WriteUInt16BE(ms, 0); // ARCOUNT
+
+        // Question
+        ms.Write(questionName);
+        WriteUInt16BE(ms, (ushort)type);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+
+        // Authority: SOA record
+        byte[] soaNameEncoded = EncodeName(soaName);
+        ms.Write(soaNameEncoded);
+        WriteUInt16BE(ms, (ushort)DnsRecordType.SOA);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+        WriteUInt32BE(ms, soaMinTtl); // TTL = soaMinTtl (for simplicity, same as minimum)
+
+        // SOA RDATA: mname, rname, serial, refresh, retry, expire, minimum
+        byte[] mname = EncodeName("ns." + soaName);
+        byte[] rname = EncodeName("admin." + soaName);
+        ushort rdLength = (ushort)(mname.Length + rname.Length + 20); // 5 x uint32
+        WriteUInt16BE(ms, rdLength);
+        ms.Write(mname);
+        ms.Write(rname);
+        WriteUInt32BE(ms, 2024010101); // serial
+        WriteUInt32BE(ms, 3600); // refresh
+        WriteUInt32BE(ms, 900); // retry
+        WriteUInt32BE(ms, 604800); // expire
+        WriteUInt32BE(ms, soaMinTtl); // minimum
 
         return ms.ToArray();
     }

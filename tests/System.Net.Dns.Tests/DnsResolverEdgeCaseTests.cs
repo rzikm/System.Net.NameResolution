@@ -67,10 +67,11 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     {
         // The server returns CNAME + A in the same response.
         // Our CollectAddresses picks up the A record from the answer section.
-        var addresses = await _resolver.ResolveAddressesAsync("alias.test", AddressFamily.InterNetwork);
+        var result = await _resolver.ResolveAddressesAsync("alias.test", AddressFamily.InterNetwork);
 
-        Assert.Single(addresses);
-        Assert.Equal("10.0.0.99", addresses[0].Address.ToString());
+        Assert.Equal(DnsResponseCode.NoError, result.ResponseCode);
+        Assert.Single(result.Records);
+        Assert.Equal("10.0.0.99", result.Records[0].Address.ToString());
     }
 
     // --- Timeout / Server Failure ---
@@ -130,9 +131,9 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(2),
         });
 
-        var addresses = await resolver.ResolveAddressesAsync("retry.test", AddressFamily.InterNetwork);
-        Assert.Single(addresses);
-        Assert.Equal("10.0.0.1", addresses[0].Address.ToString());
+        var result = await resolver.ResolveAddressesAsync("retry.test", AddressFamily.InterNetwork);
+        Assert.Single(result.Records);
+        Assert.Equal("10.0.0.1", result.Records[0].Address.ToString());
         Assert.Equal(3, callCount);
     }
 
@@ -148,8 +149,9 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(2),
         });
 
-        var addresses = await resolver.ResolveAddressesAsync("nxdomain.test", AddressFamily.InterNetwork);
-        Assert.Empty(addresses);
+        var result = await resolver.ResolveAddressesAsync("nxdomain.test", AddressFamily.InterNetwork);
+        Assert.Equal(DnsResponseCode.NameError, result.ResponseCode);
+        Assert.Empty(result.Records);
         // With NXDOMAIN, only 1 request should have been made (no retries)
         Assert.Equal(1, _primary.RequestCount);
     }
@@ -167,9 +169,9 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromMilliseconds(200),
         });
 
-        var addresses = await resolver.ResolveAddressesAsync("failover.test", AddressFamily.InterNetwork);
-        Assert.Single(addresses);
-        Assert.Equal("10.0.0.2", addresses[0].Address.ToString());
+        var result = await resolver.ResolveAddressesAsync("failover.test", AddressFamily.InterNetwork);
+        Assert.Single(result.Records);
+        Assert.Equal("10.0.0.2", result.Records[0].Address.ToString());
     }
 
     [Fact]
@@ -185,8 +187,8 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(2),
         });
 
-        var addresses = await resolver.ResolveAddressesAsync("failover2.test", AddressFamily.InterNetwork);
-        Assert.Single(addresses);
-        Assert.Equal("10.0.0.3", addresses[0].Address.ToString());
+        var result = await resolver.ResolveAddressesAsync("failover2.test", AddressFamily.InterNetwork);
+        Assert.Single(result.Records);
+        Assert.Equal("10.0.0.3", result.Records[0].Address.ToString());
     }
 }

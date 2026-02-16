@@ -23,7 +23,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     /// Resolves hostname to addresses with TTL information.
     /// AddressFamily.Unspecified queries both A and AAAA.
     /// </summary>
-    public async Task<DnsResolvedAddress[]> ResolveAddressesAsync(
+    public async Task<DnsResult<DnsResolvedAddress>> ResolveAddressesAsync(
         string hostName,
         AddressFamily addressFamily = AddressFamily.Unspecified,
         CancellationToken cancellationToken = default)
@@ -33,26 +33,43 @@ public class DnsResolver : IAsyncDisposable, IDisposable
 
         var results = new List<DnsResolvedAddress>();
         var now = DateTimeOffset.UtcNow;
+        DnsResponseCode worstResponseCode = DnsResponseCode.NoError;
+        DateTimeOffset? negativeCacheExpires = null;
 
         if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetwork)
         {
             var response = await SendQueryAsync(hostName, DnsRecordType.A, cancellationToken);
-            CollectAddresses(response, now, results);
+            var (rcode, negExpires) = CollectAddresses(response, now, results);
+            if (rcode != DnsResponseCode.NoError)
+            {
+                worstResponseCode = rcode;
+                negativeCacheExpires = negExpires;
+            }
         }
 
         if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetworkV6)
         {
             var response = await SendQueryAsync(hostName, DnsRecordType.AAAA, cancellationToken);
-            CollectAddresses(response, now, results);
+            var (rcode, negExpires) = CollectAddresses(response, now, results);
+            if (rcode != DnsResponseCode.NoError && worstResponseCode == DnsResponseCode.NoError)
+            {
+                worstResponseCode = rcode;
+                negativeCacheExpires = negExpires;
+            }
         }
 
-        return results.ToArray();
+        // If we got any addresses, treat as success regardless of individual query codes
+        // (e.g., A succeeds but AAAA returns NODATA for Unspecified)
+        if (results.Count > 0)
+            return new DnsResult<DnsResolvedAddress>(DnsResponseCode.NoError, results.ToArray());
+
+        return new DnsResult<DnsResolvedAddress>(worstResponseCode, [], negativeCacheExpires);
     }
 
     /// <summary>
     /// Resolves SRV records for service discovery.
     /// </summary>
-    public async Task<DnsResolvedService[]> ResolveServiceAsync(
+    public async Task<DnsResult<DnsResolvedService>> ResolveServiceAsync(
         string serviceName,
         CancellationToken cancellationToken = default)
     {
@@ -62,6 +79,12 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         var response = await SendQueryAsync(serviceName, DnsRecordType.SRV, cancellationToken);
         var reader = new DnsMessageReader(response);
         var now = DateTimeOffset.UtcNow;
+
+        if (reader.Header.ResponseCode != DnsResponseCode.NoError)
+        {
+            var negExpires = ExtractNegativeCacheTtl(response, now);
+            return new DnsResult<DnsResolvedService>(reader.Header.ResponseCode, [], negExpires);
+        }
 
         // Skip questions
         for (int i = 0; i < reader.Header.QuestionCount; i++)
@@ -118,7 +141,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                 addrs?.ToArray()));
         }
 
-        return services.ToArray();
+        return new DnsResult<DnsResolvedService>(DnsResponseCode.NoError, services.ToArray());
     }
 
     /// <summary>
@@ -232,11 +255,17 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         return [new IPEndPoint(IPAddress.Loopback, 53)];
     }
 
-    private static void CollectAddresses(byte[] response, DateTimeOffset now, List<DnsResolvedAddress> results)
+    private static (DnsResponseCode, DateTimeOffset?) CollectAddresses(
+        byte[] response, DateTimeOffset now, List<DnsResolvedAddress> results)
     {
         var reader = new DnsMessageReader(response);
-        if (reader.Header.ResponseCode != DnsResponseCode.NoError)
-            return;
+        var rcode = reader.Header.ResponseCode;
+
+        if (rcode != DnsResponseCode.NoError)
+        {
+            var negExpires = ExtractNegativeCacheTtl(response, now);
+            return (rcode, negExpires);
+        }
 
         for (int i = 0; i < reader.Header.QuestionCount; i++)
             reader.TryReadQuestion(out _);
@@ -256,6 +285,35 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                     aaaa.ToIPAddress(), now + TimeSpan.FromSeconds(record.TimeToLive)));
             }
         }
+
+        return (DnsResponseCode.NoError, null);
+    }
+
+    /// <summary>
+    /// Extracts the negative cache TTL from the SOA record in the authority section.
+    /// Per RFC 2308, the negative cache TTL is the minimum of the SOA TTL and the SOA MINIMUM field.
+    /// </summary>
+    private static DateTimeOffset? ExtractNegativeCacheTtl(byte[] response, DateTimeOffset now)
+    {
+        var reader = new DnsMessageReader(response);
+
+        for (int i = 0; i < reader.Header.QuestionCount; i++)
+            reader.TryReadQuestion(out _);
+        for (int i = 0; i < reader.Header.AnswerCount; i++)
+            reader.TryReadRecord(out _);
+
+        for (int i = 0; i < reader.Header.AuthorityCount; i++)
+        {
+            if (!reader.TryReadRecord(out var record)) break;
+            if (record.TryParseSoaRecord(out var soa))
+            {
+                // RFC 2308 §5: negative cache TTL = min(SOA record TTL, SOA MINIMUM field)
+                uint negativeTtl = Math.Min(record.TimeToLive, soa.MinimumTtl);
+                return now + TimeSpan.FromSeconds(negativeTtl);
+            }
+        }
+
+        return null;
     }
 
     public void Dispose()
