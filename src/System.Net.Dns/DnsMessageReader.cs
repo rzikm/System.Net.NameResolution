@@ -67,8 +67,10 @@ public ref struct DnsMessageReader
     /// </summary>
     public DnsMessageReader(ReadOnlySpan<byte> message)
     {
-        if (!DnsMessageHeader.TryRead(message, out var header))
+        if (!DnsMessageHeader.TryRead(message, out DnsMessageHeader header))
+        {
             throw new ArgumentException("Buffer too small for DNS header.", nameof(message));
+        }
 
         _message = message;
         _pos = DnsMessageHeader.Size;
@@ -83,21 +85,28 @@ public ref struct DnsMessageReader
         question = default;
 
         if (_pos >= _message.Length)
+        {
             return false;
+        }
 
         // Read name
-        var name = new DnsName(_message, _pos);
+        DnsName name = new DnsName(_message, _pos);
         int nameWireLen = name.GetWireLength();
-        if (nameWireLen < 0) return false; // malformed name
+        if (nameWireLen < 0)
+        {
+            return false; // malformed name
+        }
         _pos += nameWireLen;
 
         // Read QTYPE (2) + QCLASS (2) = 4 bytes
         if (_pos + 4 > _message.Length)
+        {
             return false;
+        }
 
-        var type = (DnsRecordType)BinaryPrimitives.ReadUInt16BigEndian(_message[_pos..]);
+        DnsRecordType type = (DnsRecordType)BinaryPrimitives.ReadUInt16BigEndian(_message[_pos..]);
         _pos += 2;
-        var @class = (DnsRecordClass)BinaryPrimitives.ReadUInt16BigEndian(_message[_pos..]);
+        DnsRecordClass @class = (DnsRecordClass)BinaryPrimitives.ReadUInt16BigEndian(_message[_pos..]);
         _pos += 2;
 
         question = new DnsQuestion(name, type, @class);
@@ -112,21 +121,28 @@ public ref struct DnsMessageReader
         record = default;
 
         if (_pos >= _message.Length)
+        {
             return false;
+        }
 
         // Read name
-        var name = new DnsName(_message, _pos);
+        DnsName name = new DnsName(_message, _pos);
         int nameWireLen = name.GetWireLength();
-        if (nameWireLen < 0) return false; // malformed name
+        if (nameWireLen < 0)
+        {
+            return false; // malformed name
+        }
         _pos += nameWireLen;
 
         // Read TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) = 10 bytes
         if (_pos + 10 > _message.Length)
+        {
             return false;
+        }
 
-        var type = (DnsRecordType)BinaryPrimitives.ReadUInt16BigEndian(_message[_pos..]);
+        DnsRecordType type = (DnsRecordType)BinaryPrimitives.ReadUInt16BigEndian(_message[_pos..]);
         _pos += 2;
-        var @class = (DnsRecordClass)BinaryPrimitives.ReadUInt16BigEndian(_message[_pos..]);
+        DnsRecordClass @class = (DnsRecordClass)BinaryPrimitives.ReadUInt16BigEndian(_message[_pos..]);
         _pos += 2;
         uint ttl = BinaryPrimitives.ReadUInt32BigEndian(_message[_pos..]);
         _pos += 4;
@@ -135,9 +151,11 @@ public ref struct DnsMessageReader
 
         int dataOffset = _pos;
         if (dataOffset + rdLength > _message.Length)
+        {
             return false;
+        }
 
-        var data = _message.Slice(dataOffset, rdLength);
+        ReadOnlySpan<byte> data = _message.Slice(dataOffset, rdLength);
         _pos += rdLength;
 
         record = new DnsRecord(name, type, @class, ttl, data, _message, dataOffset);

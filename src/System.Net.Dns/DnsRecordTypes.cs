@@ -119,11 +119,15 @@ public ref struct DnsTxtEnumerator
     public bool MoveNext()
     {
         if (_remaining.Length == 0)
+        {
             return false;
+        }
 
         int len = _remaining[0];
         if (1 + len > _remaining.Length)
+        {
             return false;
+        }
 
         _current = _remaining.Slice(1, len);
         _remaining = _remaining[(1 + len)..];
@@ -161,7 +165,9 @@ public static class DnsRecordExtensions
     {
         result = default;
         if (record.Type != DnsRecordType.A || record.Data.Length != 4)
+        {
             return false;
+        }
         result = new DnsARecordData(record.Data);
         return true;
     }
@@ -170,7 +176,9 @@ public static class DnsRecordExtensions
     {
         result = default;
         if (record.Type != DnsRecordType.AAAA || record.Data.Length != 16)
+        {
             return false;
+        }
         result = new DnsAAAARecordData(record.Data);
         return true;
     }
@@ -179,7 +187,9 @@ public static class DnsRecordExtensions
     {
         result = default;
         if (record.Type != DnsRecordType.CNAME || record.Data.Length == 0)
+        {
             return false;
+        }
         result = new DnsCNameRecordData(new DnsName(record.Message, record.DataOffset));
         return true;
     }
@@ -188,9 +198,11 @@ public static class DnsRecordExtensions
     {
         result = default;
         if (record.Type != DnsRecordType.MX || record.Data.Length < 3)
+        {
             return false;
+        }
         ushort preference = BinaryPrimitives.ReadUInt16BigEndian(record.Data);
-        var exchange = new DnsName(record.Message, record.DataOffset + 2);
+        DnsName exchange = new DnsName(record.Message, record.DataOffset + 2);
         result = new DnsMxRecordData(preference, exchange);
         return true;
     }
@@ -199,11 +211,13 @@ public static class DnsRecordExtensions
     {
         result = default;
         if (record.Type != DnsRecordType.SRV || record.Data.Length < 7)
+        {
             return false;
+        }
         ushort priority = BinaryPrimitives.ReadUInt16BigEndian(record.Data);
         ushort weight = BinaryPrimitives.ReadUInt16BigEndian(record.Data[2..]);
         ushort port = BinaryPrimitives.ReadUInt16BigEndian(record.Data[4..]);
-        var target = new DnsName(record.Message, record.DataOffset + 6);
+        DnsName target = new DnsName(record.Message, record.DataOffset + 6);
         result = new DnsSrvRecordData(priority, weight, port, target);
         return true;
     }
@@ -212,22 +226,28 @@ public static class DnsRecordExtensions
     {
         result = default;
         if (record.Type != DnsRecordType.SOA || record.Data.Length < 22)
+        {
             return false;
+        }
 
-        var mname = new DnsName(record.Message, record.DataOffset);
+        DnsName mname = new DnsName(record.Message, record.DataOffset);
         int mnameLen = mname.GetWireLength();
 
         int rnameOffset = record.DataOffset + mnameLen;
         if (rnameOffset >= record.Message.Length)
+        {
             return false;
-        var rname = new DnsName(record.Message, rnameOffset);
+        }
+        DnsName rname = new DnsName(record.Message, rnameOffset);
         int rnameLen = rname.GetWireLength();
 
         int fixedStart = rnameOffset + rnameLen - record.DataOffset;
         if (fixedStart + 20 > record.Data.Length)
+        {
             return false;
+        }
 
-        var fixedData = record.Data[fixedStart..];
+        ReadOnlySpan<byte> fixedData = record.Data[fixedStart..];
         result = new DnsSoaRecordData(mname, rname,
             BinaryPrimitives.ReadUInt32BigEndian(fixedData),
             BinaryPrimitives.ReadUInt32BigEndian(fixedData[4..]),
@@ -241,7 +261,9 @@ public static class DnsRecordExtensions
     {
         result = default;
         if (record.Type != DnsRecordType.TXT || record.Data.Length == 0)
+        {
             return false;
+        }
         result = new DnsTxtRecordData(record.Data);
         return true;
     }
@@ -250,7 +272,9 @@ public static class DnsRecordExtensions
     {
         result = default;
         if (record.Type != DnsRecordType.PTR || record.Data.Length == 0)
+        {
             return false;
+        }
         result = new DnsPtrRecordData(new DnsName(record.Message, record.DataOffset));
         return true;
     }
@@ -259,7 +283,9 @@ public static class DnsRecordExtensions
     {
         result = default;
         if (record.Type != DnsRecordType.NS || record.Data.Length == 0)
+        {
             return false;
+        }
         result = new DnsNsRecordData(new DnsName(record.Message, record.DataOffset));
         return true;
     }

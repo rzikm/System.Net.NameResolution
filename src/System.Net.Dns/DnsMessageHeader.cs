@@ -57,7 +57,9 @@ public readonly struct DnsMessageHeader
     internal bool TryWrite(Span<byte> destination)
     {
         if (destination.Length < Size)
+        {
             return false;
+        }
 
         BinaryPrimitives.WriteUInt16BigEndian(destination, Id);
         BinaryPrimitives.WriteUInt16BigEndian(destination[2..], EncodeFlagsWord());
@@ -75,7 +77,9 @@ public readonly struct DnsMessageHeader
     {
         header = default;
         if (source.Length < Size)
+        {
             return false;
+        }
 
         ushort id = BinaryPrimitives.ReadUInt16BigEndian(source);
         ushort flagsWord = BinaryPrimitives.ReadUInt16BigEndian(source[2..]);
@@ -113,22 +117,36 @@ public readonly struct DnsMessageHeader
         ushort word = 0;
 
         if (IsResponse)
+        {
             word |= 1 << 15;
+        }
 
         word |= (ushort)(((int)OpCode & 0xF) << 11);
 
         if (Flags.HasFlag(DnsHeaderFlags.AuthoritativeAnswer))
+        {
             word |= 1 << 10;
+        }
         if (Flags.HasFlag(DnsHeaderFlags.Truncation))
+        {
             word |= 1 << 9;
+        }
         if (Flags.HasFlag(DnsHeaderFlags.RecursionDesired))
+        {
             word |= 1 << 8;
+        }
         if (Flags.HasFlag(DnsHeaderFlags.RecursionAvailable))
+        {
             word |= 1 << 7;
+        }
         if (Flags.HasFlag(DnsHeaderFlags.AuthenticData))
+        {
             word |= 1 << 5;
+        }
         if (Flags.HasFlag(DnsHeaderFlags.CheckingDisabled))
+        {
             word |= 1 << 4;
+        }
 
         word |= (ushort)((int)ResponseCode & 0xF);
 
@@ -144,11 +162,29 @@ public readonly struct DnsMessageHeader
         responseCode = (DnsResponseCode)(word & 0xF);
 
         flags = DnsHeaderFlags.None;
-        if ((word & (1 << 10)) != 0) flags |= DnsHeaderFlags.AuthoritativeAnswer;
-        if ((word & (1 << 9)) != 0) flags |= DnsHeaderFlags.Truncation;
-        if ((word & (1 << 8)) != 0) flags |= DnsHeaderFlags.RecursionDesired;
-        if ((word & (1 << 7)) != 0) flags |= DnsHeaderFlags.RecursionAvailable;
-        if ((word & (1 << 5)) != 0) flags |= DnsHeaderFlags.AuthenticData;
-        if ((word & (1 << 4)) != 0) flags |= DnsHeaderFlags.CheckingDisabled;
+        if ((word & (1 << 10)) != 0)
+        {
+            flags |= DnsHeaderFlags.AuthoritativeAnswer;
+        }
+        if ((word & (1 << 9)) != 0)
+        {
+            flags |= DnsHeaderFlags.Truncation;
+        }
+        if ((word & (1 << 8)) != 0)
+        {
+            flags |= DnsHeaderFlags.RecursionDesired;
+        }
+        if ((word & (1 << 7)) != 0)
+        {
+            flags |= DnsHeaderFlags.RecursionAvailable;
+        }
+        if ((word & (1 << 5)) != 0)
+        {
+            flags |= DnsHeaderFlags.AuthenticData;
+        }
+        if ((word & (1 << 4)) != 0)
+        {
+            flags |= DnsHeaderFlags.CheckingDisabled;
+        }
     }
 }

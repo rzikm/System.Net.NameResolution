@@ -23,7 +23,9 @@ public ref struct DnsMessageWriter
     public bool TryWriteHeader(in DnsMessageHeader header)
     {
         if (!header.TryWrite(_destination[_bytesWritten..]))
+        {
             return false;
+        }
         _bytesWritten += DnsMessageHeader.Size;
         return true;
     }
@@ -39,15 +41,19 @@ public ref struct DnsMessageWriter
     {
         // Calculate the flat encoded size by enumerating labels
         int nameLen = 1; // root label terminator
-        foreach (var label in name.EnumerateLabels())
+        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
+        {
             nameLen += 1 + label.Length; // length prefix + label bytes
+        }
 
         int needed = nameLen + 4; // name + 2 bytes type + 2 bytes class
         if (_bytesWritten + needed > _destination.Length)
+        {
             return false;
+        }
 
         // Write the name label by label (expands any compression pointers)
-        foreach (var label in name.EnumerateLabels())
+        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
         {
             _destination[_bytesWritten] = (byte)label.Length;
             _bytesWritten++;

@@ -35,8 +35,8 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrEmpty(hostName);
 
-        var results = new List<DnsResolvedAddress>();
-        var now = DateTimeOffset.UtcNow;
+        List<DnsResolvedAddress> results = new();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
         DnsResponseCode worstResponseCode = DnsResponseCode.NoError;
         DateTimeOffset? negativeCacheExpires = null;
 
@@ -46,7 +46,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
             if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetwork)
             {
                 int responseLength = await SendQueryAsync(hostName, DnsRecordType.A, responseBuf, cancellationToken);
-                var (rcode, negExpires) = CollectAddresses(responseBuf.AsSpan(0, responseLength), now, results);
+                (DnsResponseCode rcode, DateTimeOffset? negExpires) = CollectAddresses(responseBuf.AsSpan(0, responseLength), now, results);
                 if (rcode != DnsResponseCode.NoError)
                 {
                     worstResponseCode = rcode;
@@ -57,7 +57,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
             if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetworkV6)
             {
                 int responseLength = await SendQueryAsync(hostName, DnsRecordType.AAAA, responseBuf, cancellationToken);
-                var (rcode, negExpires) = CollectAddresses(responseBuf.AsSpan(0, responseLength), now, results);
+                (DnsResponseCode rcode, DateTimeOffset? negExpires) = CollectAddresses(responseBuf.AsSpan(0, responseLength), now, results);
                 if (rcode != DnsResponseCode.NoError && worstResponseCode == DnsResponseCode.NoError)
                 {
                     worstResponseCode = rcode;
@@ -73,7 +73,9 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         // If we got any addresses, treat as success regardless of individual query codes
         // (e.g., A succeeds but AAAA returns NODATA for Unspecified)
         if (results.Count > 0)
+        {
             return new DnsResult<DnsResolvedAddress>(DnsResponseCode.NoError, results.ToArray());
+        }
 
         return new DnsResult<DnsResolvedAddress>(worstResponseCode, [], negativeCacheExpires);
     }
@@ -92,30 +94,35 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         try
         {
             int responseLength = await SendQueryAsync(serviceName, DnsRecordType.SRV, responseBuf, cancellationToken);
-            var responseSpan = responseBuf.AsSpan(0, responseLength);
-            var reader = new DnsMessageReader(responseSpan);
-            var now = DateTimeOffset.UtcNow;
+            ReadOnlySpan<byte> responseSpan = responseBuf.AsSpan(0, responseLength);
+            DnsMessageReader reader = new DnsMessageReader(responseSpan);
+            DateTimeOffset now = DateTimeOffset.UtcNow;
 
             if (reader.Header.ResponseCode != DnsResponseCode.NoError)
             {
-                var negExpires = ExtractNegativeCacheTtl(responseSpan, now);
+                DateTimeOffset? negExpires = ExtractNegativeCacheTtl(responseSpan, now);
                 return new DnsResult<DnsResolvedService>(reader.Header.ResponseCode, [], negExpires);
             }
 
             // Skip questions
             for (int i = 0; i < reader.Header.QuestionCount; i++)
+            {
                 reader.TryReadQuestion(out _);
+            }
 
-            var services = new List<DnsResolvedService>();
-            var additionalAddresses = new Dictionary<string, List<DnsResolvedAddress>>(StringComparer.OrdinalIgnoreCase);
+            List<DnsResolvedService> services = new();
+            Dictionary<string, List<DnsResolvedAddress>> additionalAddresses = new(StringComparer.OrdinalIgnoreCase);
 
             // Read answer records (SRV)
-            var srvRecords = new List<(string Target, ushort Port, ushort Priority, ushort Weight, DateTimeOffset ExpiresAt)>();
+            List<(string Target, ushort Port, ushort Priority, ushort Weight, DateTimeOffset ExpiresAt)> srvRecords = new();
 
             for (int i = 0; i < reader.Header.AnswerCount; i++)
             {
-                if (!reader.TryReadRecord(out var record)) break;
-                if (record.TryParseSrvRecord(out var srv))
+                if (!reader.TryReadRecord(out DnsRecord record))
+                {
+                    break;
+                }
+                if (record.TryParseSrvRecord(out DnsSrvRecordData srv))
                 {
                     srvRecords.Add((srv.Target.ToString(), srv.Port, srv.Priority, srv.Weight,
                         now + TimeSpan.FromSeconds(record.TimeToLive)));
@@ -124,34 +131,43 @@ public class DnsResolver : IAsyncDisposable, IDisposable
 
             // Skip authority
             for (int i = 0; i < reader.Header.AuthorityCount; i++)
+            {
                 reader.TryReadRecord(out _);
+            }
 
             // Read additional section for addresses
             for (int i = 0; i < reader.Header.AdditionalCount; i++)
             {
-                if (!reader.TryReadRecord(out var record)) break;
-                if (record.TryParseARecord(out var a))
+                if (!reader.TryReadRecord(out DnsRecord record))
+                {
+                    break;
+                }
+                if (record.TryParseARecord(out DnsARecordData a))
                 {
                     string name = record.Name.ToString();
                     if (!additionalAddresses.ContainsKey(name))
+                    {
                         additionalAddresses[name] = new List<DnsResolvedAddress>();
+                    }
                     additionalAddresses[name].Add(new DnsResolvedAddress(
                         a.ToIPAddress(), now + TimeSpan.FromSeconds(record.TimeToLive)));
                 }
-                else if (record.TryParseAAAARecord(out var aaaa))
+                else if (record.TryParseAAAARecord(out DnsAAAARecordData aaaa))
                 {
                     string name = record.Name.ToString();
                     if (!additionalAddresses.ContainsKey(name))
+                    {
                         additionalAddresses[name] = new List<DnsResolvedAddress>();
+                    }
                     additionalAddresses[name].Add(new DnsResolvedAddress(
                         aaaa.ToIPAddress(), now + TimeSpan.FromSeconds(record.TimeToLive)));
                 }
             }
 
             // Combine SRV records with their additional addresses
-            foreach (var (target, port, priority, weight, expiresAt) in srvRecords)
+            foreach ((string target, ushort port, ushort priority, ushort weight, DateTimeOffset expiresAt) in srvRecords)
             {
-                additionalAddresses.TryGetValue(target, out var addrs);
+                additionalAddresses.TryGetValue(target, out List<DnsResolvedAddress>? addrs);
                 services.Add(new DnsResolvedService(target, port, priority, weight, expiresAt,
                     addrs?.ToArray()));
             }
@@ -181,15 +197,17 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         try
         {
             int responseLength = await SendQueryAsync(name, type, responseBuf, cancellationToken);
-            var reader = new DnsMessageReader(responseBuf.AsSpan(0, responseLength));
-            var result = new DnsQueryResult(reader.Header.ResponseCode, reader.Header.Flags, responseBuf, responseLength);
+            DnsMessageReader reader = new DnsMessageReader(responseBuf.AsSpan(0, responseLength));
+            DnsQueryResult result = new DnsQueryResult(reader.Header.ResponseCode, reader.Header.Flags, responseBuf, responseLength);
             success = true;
             return result;
         }
         finally
         {
             if (!success)
+            {
                 ArrayPool<byte>.Shared.Return(responseBuf);
+            }
         }
     }
 
@@ -202,12 +220,14 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     {
         // Build query message on the stack
         Span<byte> nameBuf = stackalloc byte[DnsName.MaxEncodedLength];
-        var status = DnsName.TryCreate(name, nameBuf, out var dnsName, out _);
+        OperationStatus status = DnsName.TryCreate(name, nameBuf, out DnsName dnsName, out _);
         if (status != OperationStatus.Done)
+        {
             throw new ArgumentException($"Invalid DNS name: '{name}'", nameof(name));
+        }
 
         Span<byte> querySpan = stackalloc byte[MaxUdpResponseSize];
-        var writer = new DnsMessageWriter(querySpan);
+        DnsMessageWriter writer = new DnsMessageWriter(querySpan);
         ushort queryId = (ushort)Random.Shared.Next(0, ushort.MaxValue + 1);
         writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(queryId));
         writer.TryWriteQuestion(dnsName, type);
@@ -217,7 +237,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         querySpan[..writer.BytesWritten].CopyTo(queryBytes);
         int queryLength = writer.BytesWritten;
 
-        var servers = GetServers();
+        IReadOnlyList<IPEndPoint> servers = GetServers();
         if (servers.Count == 0)
         {
             ArrayPool<byte>.Shared.Return(queryBytes);
@@ -228,7 +248,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
 
         try
         {
-            foreach (var server in servers)
+            foreach (IPEndPoint server in servers)
             {
                 for (int attempt = 0; attempt <= _options.MaxRetries; attempt++)
                 {
@@ -238,7 +258,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                             queryBytes.AsMemory(0, queryLength), server, responseBuffer, ct);
 
                         // Validate response is a well-formed DNS message
-                        if (!DnsMessageHeader.TryRead(responseBuffer.AsSpan(0, responseLength), out var header))
+                        if (!DnsMessageHeader.TryRead(responseBuffer.AsSpan(0, responseLength), out DnsMessageHeader header))
                         {
                             lastException = new InvalidDataException("DNS response too short to contain a valid header.");
                             continue;
@@ -251,7 +271,9 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                         }
 
                         if (header.Id != queryId)
+                        {
                             continue; // ignore mismatched response, retry
+                        }
 
                         if (header.ResponseCode == DnsResponseCode.ServerFailure)
                         {
@@ -288,12 +310,12 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         ReadOnlyMemory<byte> query, IPEndPoint server,
         byte[] responseBuffer, CancellationToken ct)
     {
-        using var udp = new UdpClient(server.AddressFamily);
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using UdpClient udp = new UdpClient(server.AddressFamily);
+        using CancellationTokenSource timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(_options.Timeout);
 
         await udp.SendAsync(query, server, timeoutCts.Token);
-        var result = await udp.ReceiveAsync(timeoutCts.Token);
+        UdpReceiveResult result = await udp.ReceiveAsync(timeoutCts.Token);
 
         result.Buffer.CopyTo(responseBuffer, 0);
         return result.Buffer.Length;
@@ -302,7 +324,9 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     private IReadOnlyList<IPEndPoint> GetServers()
     {
         if (_options.Servers.Count > 0)
+        {
             return (IReadOnlyList<IPEndPoint>)_options.Servers;
+        }
 
         // Fallback: use system DNS — for now just return the loopback as placeholder.
         // A real implementation would parse resolv.conf on Linux or use
@@ -313,28 +337,33 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     private static (DnsResponseCode, DateTimeOffset?) CollectAddresses(
         ReadOnlySpan<byte> response, DateTimeOffset now, List<DnsResolvedAddress> results)
     {
-        var reader = new DnsMessageReader(response);
-        var rcode = reader.Header.ResponseCode;
+        DnsMessageReader reader = new DnsMessageReader(response);
+        DnsResponseCode rcode = reader.Header.ResponseCode;
 
         if (rcode != DnsResponseCode.NoError)
         {
-            var negExpires = ExtractNegativeCacheTtl(response, now);
+            DateTimeOffset? negExpires = ExtractNegativeCacheTtl(response, now);
             return (rcode, negExpires);
         }
 
         for (int i = 0; i < reader.Header.QuestionCount; i++)
+        {
             reader.TryReadQuestion(out _);
+        }
 
         for (int i = 0; i < reader.Header.AnswerCount; i++)
         {
-            if (!reader.TryReadRecord(out var record)) break;
+            if (!reader.TryReadRecord(out DnsRecord record))
+            {
+                break;
+            }
 
-            if (record.TryParseARecord(out var a))
+            if (record.TryParseARecord(out DnsARecordData a))
             {
                 results.Add(new DnsResolvedAddress(
                     a.ToIPAddress(), now + TimeSpan.FromSeconds(record.TimeToLive)));
             }
-            else if (record.TryParseAAAARecord(out var aaaa))
+            else if (record.TryParseAAAARecord(out DnsAAAARecordData aaaa))
             {
                 results.Add(new DnsResolvedAddress(
                     aaaa.ToIPAddress(), now + TimeSpan.FromSeconds(record.TimeToLive)));
@@ -350,17 +379,24 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     /// </summary>
     private static DateTimeOffset? ExtractNegativeCacheTtl(ReadOnlySpan<byte> response, DateTimeOffset now)
     {
-        var reader = new DnsMessageReader(response);
+        DnsMessageReader reader = new DnsMessageReader(response);
 
         for (int i = 0; i < reader.Header.QuestionCount; i++)
+        {
             reader.TryReadQuestion(out _);
+        }
         for (int i = 0; i < reader.Header.AnswerCount; i++)
+        {
             reader.TryReadRecord(out _);
+        }
 
         for (int i = 0; i < reader.Header.AuthorityCount; i++)
         {
-            if (!reader.TryReadRecord(out var record)) break;
-            if (record.TryParseSoaRecord(out var soa))
+            if (!reader.TryReadRecord(out DnsRecord record))
+            {
+                break;
+            }
+            if (record.TryParseSoaRecord(out DnsSoaRecordData soa))
             {
                 // RFC 2308 §5: negative cache TTL = min(SOA record TTL, SOA MINIMUM field)
                 uint negativeTtl = Math.Min(record.TimeToLive, soa.MinimumTtl);

@@ -54,7 +54,9 @@ public readonly ref struct DnsName
         if (name.Length == 0 || (name.Length == 1 && name[0] == '.'))
         {
             if (destination.Length < 1)
+            {
                 return OperationStatus.DestinationTooSmall;
+            }
             destination[0] = 0; // root label
             bytesWritten = 1;
             result = new DnsName(destination[..1], 0);
@@ -63,7 +65,9 @@ public readonly ref struct DnsName
 
         // Strip trailing dot if present (FQDN notation)
         if (name[^1] == '.')
+        {
             name = name[..^1];
+        }
 
         int pos = 0;
         int nameIdx = 0;
@@ -76,17 +80,25 @@ public readonly ref struct DnsName
             int labelLen = labelEnd - nameIdx;
 
             if (labelLen == 0)
+            {
                 return OperationStatus.InvalidData; // consecutive dots
+            }
             if (labelLen > 63)
+            {
                 return OperationStatus.InvalidData; // label too long
+            }
 
             // Check total length so far
             int needed = pos + 1 + labelLen + 1; // length byte + label + at least root terminator
             if (needed > MaxEncodedLength)
+            {
                 return OperationStatus.InvalidData; // name too long
+            }
 
             if (pos + 1 + labelLen > destination.Length)
+            {
                 return OperationStatus.DestinationTooSmall;
+            }
 
             // Write length prefix
             destination[pos] = (byte)labelLen;
@@ -97,7 +109,9 @@ public readonly ref struct DnsName
             {
                 char c = name[nameIdx + i];
                 if (c > 127)
+                {
                     return OperationStatus.InvalidData;
+                }
                 // Allow letters, digits, hyphens per RFC 1035 §2.3.1
                 // We're lenient: allow any ASCII printable except '.'
                 destination[pos + i] = (byte)c;
@@ -110,7 +124,9 @@ public readonly ref struct DnsName
 
         // Write root label terminator
         if (pos >= destination.Length)
+        {
             return OperationStatus.DestinationTooSmall;
+        }
         destination[pos] = 0;
         pos++;
 
@@ -126,33 +142,44 @@ public readonly ref struct DnsName
     {
         // Strip trailing dot from the comparison name
         if (name.Length > 0 && name[^1] == '.')
+        {
             name = name[..^1];
+        }
 
-        var enumerator = EnumerateLabels();
+        DnsLabelEnumerator enumerator = EnumerateLabels();
         int nameIdx = 0;
 
         while (enumerator.MoveNext())
         {
-            var label = enumerator.Current;
+            ReadOnlySpan<byte> label = enumerator.Current;
 
             if (nameIdx > 0)
             {
                 // Expect a dot separator
                 if (nameIdx >= name.Length || name[nameIdx] != '.')
+                {
                     return false;
+                }
                 nameIdx++;
             }
 
             if (nameIdx + label.Length > name.Length)
+            {
                 return false;
+            }
 
             // Case-insensitive compare of label bytes vs name chars
             for (int i = 0; i < label.Length; i++)
             {
                 char c = name[nameIdx + i];
-                if (c > 127) return false;
-                if (!AsciiEqualsIgnoreCase((byte)c, label[i]))
+                if (c > 127)
+                {
                     return false;
+                }
+                if (!AsciiEqualsIgnoreCase((byte)c, label[i]))
+                {
+                    return false;
+                }
             }
             nameIdx += label.Length;
         }
@@ -166,27 +193,33 @@ public readonly ref struct DnsName
     public bool TryFormat(Span<char> destination, out int charsWritten)
     {
         charsWritten = 0;
-        var enumerator = EnumerateLabels();
+        DnsLabelEnumerator enumerator = EnumerateLabels();
         bool first = true;
 
         while (enumerator.MoveNext())
         {
-            var label = enumerator.Current;
+            ReadOnlySpan<byte> label = enumerator.Current;
 
             if (!first)
             {
                 if (charsWritten >= destination.Length)
+                {
                     return false;
+                }
                 destination[charsWritten] = '.';
                 charsWritten++;
             }
             first = false;
 
             if (charsWritten + label.Length > destination.Length)
+            {
                 return false;
+            }
 
             for (int i = 0; i < label.Length; i++)
+            {
                 destination[charsWritten + i] = (char)label[i];
+            }
             charsWritten += label.Length;
         }
 
@@ -200,12 +233,15 @@ public readonly ref struct DnsName
     public int GetFormattedLength()
     {
         int length = 0;
-        var enumerator = EnumerateLabels();
+        DnsLabelEnumerator enumerator = EnumerateLabels();
         bool first = true;
 
         while (enumerator.MoveNext())
         {
-            if (!first) length++; // dot separator
+            if (!first)
+            {
+                length++; // dot separator
+            }
             first = false;
             length += enumerator.Current.Length;
         }
@@ -221,7 +257,10 @@ public readonly ref struct DnsName
     public override string ToString()
     {
         int len = GetFormattedLength();
-        if (len == 0) return ".";
+        if (len == 0)
+        {
+            return ".";
+        }
         Span<char> chars = len <= 256 ? stackalloc char[len] : new char[len];
         TryFormat(chars, out _);
         return new string(chars);
@@ -237,9 +276,18 @@ public readonly ref struct DnsName
         while (pos < _buffer.Length)
         {
             byte b = _buffer[pos];
-            if (b == 0) return pos + 1 - _offset; // root label
-            if ((b & 0xC0) == 0xC0) return pos + 2 - _offset; // compression pointer
-            if (pos + 1 + b > _buffer.Length) break; // malformed: label extends past buffer
+            if (b == 0)
+            {
+                return pos + 1 - _offset; // root label
+            }
+            if ((b & 0xC0) == 0xC0)
+            {
+                return pos + 2 - _offset; // compression pointer
+            }
+            if (pos + 1 + b > _buffer.Length)
+            {
+                break; // malformed: label extends past buffer
+            }
             pos += 1 + b; // skip label
         }
         return -1; // malformed name
@@ -247,10 +295,19 @@ public readonly ref struct DnsName
 
     private static bool AsciiEqualsIgnoreCase(byte a, byte b)
     {
-        if (a == b) return true;
+        if (a == b)
+        {
+            return true;
+        }
         // Normalize to uppercase and compare
-        if (a >= (byte)'a' && a <= (byte)'z') a -= 32;
-        if (b >= (byte)'a' && b <= (byte)'z') b -= 32;
+        if (a >= (byte)'a' && a <= (byte)'z')
+        {
+            a -= 32;
+        }
+        if (b >= (byte)'a' && b <= (byte)'z')
+        {
+            b -= 32;
+        }
         return a == b;
     }
 }
@@ -292,18 +349,30 @@ public ref struct DnsLabelEnumerator
             if ((b & 0xC0) == 0xC0)
             {
                 // Compression pointer: 2 bytes, upper 2 bits are 11
-                if (_pos + 1 >= _buffer.Length) return false;
+                if (_pos + 1 >= _buffer.Length)
+                {
+                    return false;
+                }
                 int pointer = ((b & 0x3F) << 8) | _buffer[_pos + 1];
-                if (pointer >= _buffer.Length) return false; // invalid pointer target
+                if (pointer >= _buffer.Length)
+                {
+                    return false; // invalid pointer target
+                }
                 _pos = pointer;
-                if (++hops > MaxPointerHops) return false; // loop protection
+                if (++hops > MaxPointerHops)
+                {
+                    return false; // loop protection
+                }
                 continue;
             }
 
             // Regular label
             int labelLen = b;
             _pos++;
-            if (_pos + labelLen > _buffer.Length) return false;
+            if (_pos + labelLen > _buffer.Length)
+            {
+                return false;
+            }
             _current = _buffer.Slice(_pos, labelLen);
             _pos += labelLen;
             return true;
