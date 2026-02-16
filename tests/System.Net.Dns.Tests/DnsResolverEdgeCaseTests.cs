@@ -21,6 +21,22 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         // Drop (no response → timeout)
         _server.AddDrop("timeout.test", DnsRecordType.A);
 
+        // Malformed: response too short (only 4 bytes)
+        _server.AddRawResponse("truncated.test", DnsRecordType.A, id => [(byte)(id >> 8), (byte)id, 0x81, 0x80]);
+
+        // Malformed: response with QR=0 (looks like a query, not a response)
+        _server.AddRawResponse("notresponse.test", DnsRecordType.A, id =>
+        {
+            // Valid 12-byte header but QR=0
+            var buf = new byte[12];
+            buf[0] = (byte)(id >> 8);
+            buf[1] = (byte)id;
+            // flags = 0x0100 (RD=1, QR=0)
+            buf[2] = 0x01;
+            buf[3] = 0x00;
+            return buf;
+        });
+
         _resolver = new DnsResolver(new DnsResolverOptions
         {
             Servers = [_server.EndPoint],
@@ -91,6 +107,26 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         // With MaxRetries=0, single attempt fails → all servers failed
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => _resolver.ResolveAddressesAsync("fail.test", AddressFamily.InterNetwork));
+    }
+
+    // --- Malformed responses ---
+
+    [Fact]
+    public async Task TruncatedResponse_ThrowsWithInvalidDataInner()
+    {
+        // Response is only 4 bytes — too short for a DNS header
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _resolver.ResolveAddressesAsync("truncated.test", AddressFamily.InterNetwork));
+        Assert.IsType<InvalidDataException>(ex.InnerException);
+    }
+
+    [Fact]
+    public async Task NonResponseMessage_ThrowsWithInvalidDataInner()
+    {
+        // Response has QR=0 — not a valid DNS response
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _resolver.ResolveAddressesAsync("notresponse.test", AddressFamily.InterNetwork));
+        Assert.IsType<InvalidDataException>(ex.InnerException);
     }
 }
 
@@ -190,5 +226,33 @@ public class DnsResolverRetryTests : IAsyncLifetime
         var result = await resolver.ResolveAddressesAsync("failover2.test", AddressFamily.InterNetwork);
         Assert.Single(result.Records);
         Assert.Equal("10.0.0.3", result.Records[0].Address.ToString());
+    }
+
+    [Fact]
+    public async Task Retry_MalformedThenSuccess()
+    {
+        int callCount = 0;
+        _primary.AddResponse("malformed-retry.test", DnsRecordType.A, (queryId, qName) =>
+        {
+            callCount++;
+            if (callCount < 2)
+            {
+                // Return a truncated response (too short for header)
+                return [(byte)(queryId >> 8), (byte)queryId, 0x81, 0x80];
+            }
+            return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 5], 60);
+        });
+
+        await using var resolver = new DnsResolver(new DnsResolverOptions
+        {
+            Servers = [_primary.EndPoint],
+            MaxRetries = 2,
+            Timeout = TimeSpan.FromSeconds(2),
+        });
+
+        var result = await resolver.ResolveAddressesAsync("malformed-retry.test", AddressFamily.InterNetwork);
+        Assert.Single(result.Records);
+        Assert.Equal("10.0.0.5", result.Records[0].Address.ToString());
+        Assert.Equal(2, callCount);
     }
 }

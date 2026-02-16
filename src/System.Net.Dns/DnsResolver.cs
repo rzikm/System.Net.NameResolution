@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO;
 using System.Net.Sockets;
 
 namespace System.Net;
@@ -181,23 +182,29 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                 {
                     byte[] response = await SendUdpQueryAsync(queryBytes, server, ct);
 
-                    // Validate transaction ID matches
-                    if (response.Length >= 2)
+                    // Validate response is a well-formed DNS message
+                    if (!DnsMessageHeader.TryRead(response, out var header))
                     {
-                        ushort responseId = System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(response);
-                        if (responseId != queryId)
-                            continue; // ignore mismatched response, retry
+                        lastException = new InvalidDataException("DNS response too short to contain a valid header.");
+                        continue; // retry
                     }
 
-                    // Check for retriable server errors
-                    if (response.Length >= 4)
+                    // Must be a response (QR=1), not a query
+                    if (!header.IsResponse)
                     {
-                        var rcode = (DnsResponseCode)(response[3] & 0xF);
-                        if (rcode == DnsResponseCode.ServerFailure)
-                        {
-                            lastException = new InvalidOperationException($"DNS server returned {rcode}");
-                            continue; // retry
-                        }
+                        lastException = new InvalidDataException("DNS response has QR=0 (not a response).");
+                        continue;
+                    }
+
+                    // Validate transaction ID matches
+                    if (header.Id != queryId)
+                        continue; // ignore mismatched response, retry
+
+                    // Check for retriable server errors
+                    if (header.ResponseCode == DnsResponseCode.ServerFailure)
+                    {
+                        lastException = new InvalidOperationException($"DNS server returned {header.ResponseCode}");
+                        continue; // retry
                     }
 
                     return response;

@@ -88,6 +88,15 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     }
 
     /// <summary>
+    /// Adds a response that sends raw bytes (for testing malformed responses).
+    /// The factory receives the query transaction ID.
+    /// </summary>
+    public void AddRawResponse(string name, DnsRecordType type, Func<ushort, byte[]> rawFactory)
+    {
+        AddResponse(name, type, (queryId, _) => rawFactory(queryId));
+    }
+
+    /// <summary>
     /// Adds a ServerFailure response.
     /// </summary>
     public void AddServerFailure(string name, DnsRecordType type)
