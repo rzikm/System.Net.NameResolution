@@ -1,3 +1,5 @@
+using System.Buffers;
+
 namespace System.Net;
 
 /// <summary>
@@ -77,7 +79,7 @@ public readonly struct DnsResolvedService
 
 /// <summary>
 /// Bridges the high-level transport with the low-level message parser.
-/// Returns the raw wire-format response.
+/// Returns the raw wire-format response. Dispose to return the buffer to the pool.
 /// </summary>
 public sealed class DnsQueryResult : IDisposable
 {
@@ -85,12 +87,24 @@ public sealed class DnsQueryResult : IDisposable
     public DnsHeaderFlags Flags { get; }
     public ReadOnlyMemory<byte> ResponseMessage { get; }
 
-    internal DnsQueryResult(DnsResponseCode responseCode, DnsHeaderFlags flags, byte[] responseMessage)
+    private byte[]? _pooledBuffer;
+
+    internal DnsQueryResult(DnsResponseCode responseCode, DnsHeaderFlags flags,
+        byte[] pooledBuffer, int length)
     {
         ResponseCode = responseCode;
         Flags = flags;
-        ResponseMessage = responseMessage;
+        _pooledBuffer = pooledBuffer;
+        ResponseMessage = pooledBuffer.AsMemory(0, length);
     }
 
-    public void Dispose() { }
+    public void Dispose()
+    {
+        byte[]? buf = _pooledBuffer;
+        if (buf != null)
+        {
+            _pooledBuffer = null;
+            ArrayPool<byte>.Shared.Return(buf);
+        }
+    }
 }
