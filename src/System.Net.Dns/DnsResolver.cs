@@ -294,6 +294,11 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                     {
                         throw;
                     }
+                    catch (OperationCanceledException)
+                    {
+                        // Per-attempt timeout (not user cancellation)
+                        lastException = new TimeoutException("DNS query timed out.");
+                    }
                     catch (Exception ex)
                     {
                         lastException = ex;
@@ -304,6 +309,11 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         finally
         {
             ArrayPool<byte>.Shared.Return(queryBytes);
+        }
+
+        if (lastException is TimeoutException)
+        {
+            throw lastException;
         }
 
         throw new InvalidOperationException("All DNS servers failed.", lastException);

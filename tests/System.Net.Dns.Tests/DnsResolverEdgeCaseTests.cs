@@ -101,10 +101,10 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     // --- Timeout / Server Failure ---
 
     [Fact]
-    public async Task Timeout_ThrowsInvalidOperation()
+    public async Task Timeout_ThrowsTimeoutException()
     {
-        // Server drops the packet, timeout fires → all servers failed
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        // Server drops the packet, timeout fires → TimeoutException
+        await Assert.ThrowsAsync<TimeoutException>(
             () => _resolver.ResolveAddressesAsync("timeout.test", AddressFamily.InterNetwork));
     }
 
