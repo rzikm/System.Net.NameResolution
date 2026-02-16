@@ -37,6 +37,14 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
             return buf;
         });
 
+        // Malformed: response with a different question name
+        _server.AddRawResponse("wrongquestion.test", DnsRecordType.A, id =>
+        {
+            // Build a valid response but with question name "other.test" instead of "wrongquestion.test"
+            return LoopbackDnsServer.BuildSimpleResponse(id,
+                LoopbackDnsServer.EncodeName("other.test"), DnsRecordType.A, [10, 0, 0, 1], 60);
+        });
+
         _resolver = new DnsResolver(new DnsResolverOptions
         {
             Servers = [_server.EndPoint],
@@ -126,6 +134,15 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         // Response has QR=0 — not a valid DNS response
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _resolver.ResolveAddressesAsync("notresponse.test", AddressFamily.InterNetwork));
+        Assert.IsType<InvalidDataException>(ex.InnerException);
+    }
+
+    [Fact]
+    public async Task WrongQuestionName_ThrowsWithInvalidDataInner()
+    {
+        // Response echoes back a different question name than what was queried
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _resolver.ResolveAddressesAsync("wrongquestion.test", AddressFamily.InterNetwork));
         Assert.IsType<InvalidDataException>(ex.InnerException);
     }
 }

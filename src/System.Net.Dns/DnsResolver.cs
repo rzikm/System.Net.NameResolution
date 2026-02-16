@@ -275,6 +275,13 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                             continue; // ignore mismatched response, retry
                         }
 
+                        // Validate response echoes back the same question
+                        if (!ValidateResponseQuestion(responseBuffer.AsSpan(0, responseLength), header, name, type))
+                        {
+                            lastException = new InvalidDataException("DNS response question does not match the query.");
+                            continue;
+                        }
+
                         if (header.ResponseCode == DnsResponseCode.ServerFailure)
                         {
                             lastException = new InvalidOperationException($"DNS server returned {header.ResponseCode}");
@@ -404,6 +411,26 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Validates that the response contains exactly one question matching the query name and type.
+    /// </summary>
+    private static bool ValidateResponseQuestion(
+        ReadOnlySpan<byte> response, DnsMessageHeader header, string expectedName, DnsRecordType expectedType)
+    {
+        if (header.QuestionCount != 1)
+        {
+            return false;
+        }
+
+        DnsMessageReader reader = new DnsMessageReader(response);
+        if (!reader.TryReadQuestion(out DnsQuestion question))
+        {
+            return false;
+        }
+
+        return question.Type == expectedType && question.Name.Equals(expectedName);
     }
 
     public void Dispose()

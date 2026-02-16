@@ -196,7 +196,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         return ms.ToArray();
     }
 
-    private static byte[] EncodeName(string name)
+    internal static byte[] EncodeName(string name)
     {
         Span<byte> buf = stackalloc byte[DnsName.MaxEncodedLength];
         DnsName.TryCreate(name, buf, out _, out int written);
