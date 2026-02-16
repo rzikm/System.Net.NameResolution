@@ -3,6 +3,7 @@
     <Project Path="src/System.Net.Dns/System.Net.Dns.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/System.Net.Dns.FuzzTests/System.Net.Dns.FuzzTests.csproj" />
     <Project Path="tests/System.Net.Dns.Tests/System.Net.Dns.Tests.csproj" />
   </Folder>
 </Solution>
