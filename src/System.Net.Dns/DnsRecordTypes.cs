@@ -232,6 +232,10 @@ public static class DnsRecordExtensions
 
         DnsName mname = new DnsName(record.Message, record.DataOffset);
         int mnameLen = mname.GetWireLength();
+        if (mnameLen < 0)
+        {
+            return false;
+        }
 
         int rnameOffset = record.DataOffset + mnameLen;
         if (rnameOffset >= record.Message.Length)
@@ -240,6 +244,10 @@ public static class DnsRecordExtensions
         }
         DnsName rname = new DnsName(record.Message, rnameOffset);
         int rnameLen = rname.GetWireLength();
+        if (rnameLen < 0)
+        {
+            return false;
+        }
 
         int fixedStart = rnameOffset + rnameLen - record.DataOffset;
         if (fixedStart + 20 > record.Data.Length)

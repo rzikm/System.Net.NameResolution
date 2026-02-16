@@ -63,8 +63,9 @@ public readonly ref struct DnsName
             return OperationStatus.Done;
         }
 
-        // Strip trailing dot if present (FQDN notation)
-        if (name[^1] == '.')
+        // Strip trailing dot if present (FQDN notation),
+        // but only if it doesn't create an empty label (e.g., "vp.." should remain invalid)
+        if (name[^1] == '.' && (name.Length < 2 || name[^2] != '.'))
         {
             name = name[..^1];
         }
@@ -284,6 +285,10 @@ public readonly ref struct DnsName
             {
                 return pos + 2 - _offset; // compression pointer
             }
+            if (b > 63)
+            {
+                break; // label too long per RFC 1035
+            }
             if (pos + 1 + b > _buffer.Length)
             {
                 break; // malformed: label extends past buffer
@@ -317,14 +322,18 @@ public readonly ref struct DnsName
 /// </summary>
 public ref struct DnsLabelEnumerator
 {
+    private const int MaxPointerHops = 16; // prevent infinite loops from malformed compression pointers
+
     private readonly ReadOnlySpan<byte> _buffer;
     private int _pos;
+    private int _hops;
     private ReadOnlySpan<byte> _current;
 
     internal DnsLabelEnumerator(ReadOnlySpan<byte> buffer, int offset)
     {
         _buffer = buffer;
         _pos = offset;
+        _hops = 0;
         _current = default;
     }
 
@@ -332,9 +341,6 @@ public ref struct DnsLabelEnumerator
 
     public bool MoveNext()
     {
-        const int MaxPointerHops = 128; // prevent infinite loops
-        int hops = 0;
-
         while (_pos < _buffer.Length)
         {
             byte b = _buffer[_pos];
@@ -359,7 +365,7 @@ public ref struct DnsLabelEnumerator
                     return false; // invalid pointer target
                 }
                 _pos = pointer;
-                if (++hops > MaxPointerHops)
+                if (++_hops > MaxPointerHops)
                 {
                     return false; // loop protection
                 }
@@ -368,6 +374,10 @@ public ref struct DnsLabelEnumerator
 
             // Regular label
             int labelLen = b;
+            if (labelLen > 63)
+            {
+                return false; // label too long per RFC 1035
+            }
             _pos++;
             if (_pos + labelLen > _buffer.Length)
             {

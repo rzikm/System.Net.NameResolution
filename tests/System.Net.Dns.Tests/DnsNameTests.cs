@@ -291,4 +291,21 @@ public class DnsNameTests
         var enumerator = name.EnumerateLabels();
         Assert.False(enumerator.MoveNext());
     }
+
+    [Fact]
+    public void TryCreate_TrailingDoubleDot_ReturnsInvalidData()
+    {
+        Span<byte> nameBuf = stackalloc byte[DnsName.MaxEncodedLength];
+        OperationStatus status = DnsName.TryCreate("vp..", nameBuf, out _, out _);
+        Assert.Equal(OperationStatus.InvalidData, status);
+    }
+
+    [Fact]
+    public void TryCreate_NullCharsAndConsecutiveDots_ReturnsInvalidData()
+    {
+        Span<char> nameChars = ['\0', '\0', '\0', '\0', 'p', '.', '.'];
+        Span<byte> nameBuf = stackalloc byte[DnsName.MaxEncodedLength];
+        OperationStatus status = DnsName.TryCreate(nameChars, nameBuf, out _, out _);
+        Assert.Equal(OperationStatus.InvalidData, status);
+    }
 }
