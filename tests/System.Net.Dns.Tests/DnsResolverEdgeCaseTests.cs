@@ -170,11 +170,9 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     public async Task ResolveAddresses_CNameAndARecord_ReturnsAddress()
     {
         byte[] cnameEncoded = LoopbackDnsServer.EncodeName("real.test");
-        _server.AddResponse("alias.test", DnsRecordType.A, (queryId, qName, _) =>
-            DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
-                .Answer(DnsRecordType.CNAME, cnameEncoded, ttl: 300)
-                .Answer("real.test", DnsRecordType.A, [10, 0, 0, 99], ttl: 300)
-                .Build());
+        _server.AddResponse("alias.test", DnsRecordType.A, b => b
+            .Answer(DnsRecordType.CNAME, cnameEncoded, ttl: 300)
+            .Answer("real.test", DnsRecordType.A, [10, 0, 0, 99], ttl: 300));
 
         DnsResult<DnsResolvedAddress> result = await _resolver.ResolveAddressesAsync("alias.test", AddressFamily.InterNetwork);
 
@@ -260,10 +258,8 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     public async Task MalformedAnswerRecords_ThrowsInvalidDataException()
     {
         // Header says ANCOUNT=2 but no answer records are present after the question
-        _server.AddResponse("malformed-answers.test", DnsRecordType.A, (queryId, qName, _) =>
-            DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
-                .OverrideAnswerCount(2)
-                .Build());
+        _server.AddResponse("malformed-answers.test", DnsRecordType.A, b => b
+            .OverrideAnswerCount(2));
 
         await Assert.ThrowsAsync<InvalidDataException>(
             () => _resolver.ResolveAddressesAsync("malformed-answers.test", AddressFamily.InterNetwork));
@@ -290,10 +286,8 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     public async Task MalformedSrvAnswerRecords_ThrowsInvalidDataException()
     {
         // Header says ANCOUNT=1 but no answer record data present after question
-        _server.AddResponse("malformed-srv.test", DnsRecordType.SRV, (queryId, qName, _) =>
-            DnsResponseBuilder.For(queryId, qName, DnsRecordType.SRV)
-                .OverrideAnswerCount(1)
-                .Build());
+        _server.AddResponse("malformed-srv.test", DnsRecordType.SRV, b => b
+            .OverrideAnswerCount(1));
 
         await Assert.ThrowsAsync<InvalidDataException>(
             () => _resolver.ResolveServiceAsync("malformed-srv.test"));
@@ -304,11 +298,9 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     {
         // Valid answer, but NSCOUNT claims authority records that aren't there.
         // ResolveServiceAsync reads the authority section, so this tests that path.
-        _server.AddResponse("malformed-auth.test", DnsRecordType.SRV, (queryId, qName, _) =>
-            DnsResponseBuilder.For(queryId, qName, DnsRecordType.SRV)
-                .Answer(new byte[] { 0, 0, 0, 0, 0x00, 0x50, 3, (byte)'s', (byte)'v', (byte)'c', 4, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0 }, ttl: 300)
-                .OverrideAuthorityCount(1)
-                .Build());
+        _server.AddResponse("malformed-auth.test", DnsRecordType.SRV, b => b
+            .Answer(new byte[] { 0, 0, 0, 0, 0x00, 0x50, 3, (byte)'s', (byte)'v', (byte)'c', 4, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0 }, ttl: 300)
+            .OverrideAuthorityCount(1));
 
         await Assert.ThrowsAsync<InvalidDataException>(
             () => _resolver.ResolveServiceAsync("malformed-auth.test"));
@@ -332,10 +324,8 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     {
         // Build a response with ARCOUNT > 0 but no additional records.
         // ResolveServiceAsync reads the additional section.
-        _server.AddResponse("malformed-additional.test", DnsRecordType.SRV, (queryId, qName, _) =>
-            DnsResponseBuilder.For(queryId, qName, DnsRecordType.SRV)
-                .OverrideAdditionalCount(1)
-                .Build());
+        _server.AddResponse("malformed-additional.test", DnsRecordType.SRV, b => b
+            .OverrideAdditionalCount(1));
 
         await Assert.ThrowsAsync<InvalidDataException>(
             () => _resolver.ResolveServiceAsync("malformed-additional.test"));

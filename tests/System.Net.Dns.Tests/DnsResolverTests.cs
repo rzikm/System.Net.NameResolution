@@ -172,16 +172,12 @@ public class DnsResolverTests : IAsyncLifetime
     [Fact]
     public async Task ResolveService_ReturnsSrvRecords()
     {
-        _server.AddResponse("_http._tcp.svc.test", DnsRecordType.SRV, (queryId, qName, _) =>
-        {
-            return DnsResponseBuilder.For(queryId, qName, DnsRecordType.SRV)
-                .Answer(DnsResponseBuilder.BuildSrvRdata(10, 100, 8080, "node1.test"), ttl: 120)
-                .Answer(DnsResponseBuilder.BuildSrvRdata(20, 50, 8081, "node2.test"), ttl: 120)
-                .Additional("node1.test", DnsRecordType.A, [10, 0, 0, 10], ttl: 120)
-                .Additional("node2.test", DnsRecordType.A, [10, 0, 0, 11], ttl: 120)
-                .Additional("node2.test", DnsRecordType.AAAA, IPAddress.Parse("fd00::11").GetAddressBytes(), ttl: 120)
-                .Build();
-        });
+        _server.AddResponse("_http._tcp.svc.test", DnsRecordType.SRV, b => b
+            .Answer(DnsResponseBuilder.BuildSrvRdata(10, 100, 8080, "node1.test"), ttl: 120)
+            .Answer(DnsResponseBuilder.BuildSrvRdata(20, 50, 8081, "node2.test"), ttl: 120)
+            .Additional("node1.test", DnsRecordType.A, [10, 0, 0, 10], ttl: 120)
+            .Additional("node2.test", DnsRecordType.A, [10, 0, 0, 11], ttl: 120)
+            .Additional("node2.test", DnsRecordType.AAAA, IPAddress.Parse("fd00::11").GetAddressBytes(), ttl: 120));
 
         DnsResult<DnsResolvedService> result = await _resolver.ResolveServiceAsync("_http._tcp.svc.test");
 
@@ -201,16 +197,12 @@ public class DnsResolverTests : IAsyncLifetime
     [Fact]
     public async Task ResolveService_IncludesAdditionalAddresses()
     {
-        _server.AddResponse("_http._tcp.svc.test", DnsRecordType.SRV, (queryId, qName, _) =>
-        {
-            return DnsResponseBuilder.For(queryId, qName, DnsRecordType.SRV)
-                .Answer(DnsResponseBuilder.BuildSrvRdata(10, 100, 8080, "node1.test"), ttl: 120)
-                .Answer(DnsResponseBuilder.BuildSrvRdata(20, 50, 8081, "node2.test"), ttl: 120)
-                .Additional("node1.test", DnsRecordType.A, [10, 0, 0, 10], ttl: 120)
-                .Additional("node2.test", DnsRecordType.A, [10, 0, 0, 11], ttl: 120)
-                .Additional("node2.test", DnsRecordType.AAAA, IPAddress.Parse("fd00::11").GetAddressBytes(), ttl: 120)
-                .Build();
-        });
+        _server.AddResponse("_http._tcp.svc.test", DnsRecordType.SRV, b => b
+            .Answer(DnsResponseBuilder.BuildSrvRdata(10, 100, 8080, "node1.test"), ttl: 120)
+            .Answer(DnsResponseBuilder.BuildSrvRdata(20, 50, 8081, "node2.test"), ttl: 120)
+            .Additional("node1.test", DnsRecordType.A, [10, 0, 0, 10], ttl: 120)
+            .Additional("node2.test", DnsRecordType.A, [10, 0, 0, 11], ttl: 120)
+            .Additional("node2.test", DnsRecordType.AAAA, IPAddress.Parse("fd00::11").GetAddressBytes(), ttl: 120));
 
         DnsResult<DnsResolvedService> result = await _resolver.ResolveServiceAsync("_http._tcp.svc.test");
 
@@ -227,12 +219,8 @@ public class DnsResolverTests : IAsyncLifetime
     [Fact]
     public async Task ResolveService_NoAdditionalAddresses()
     {
-        _server.AddResponse("_noadd._tcp.svc.test", DnsRecordType.SRV, (queryId, qName, _) =>
-        {
-            return DnsResponseBuilder.For(queryId, qName, DnsRecordType.SRV)
-                .Answer(DnsResponseBuilder.BuildSrvRdata(10, 100, 9090, "noaddr.test"), ttl: 60)
-                .Build();
-        });
+        _server.AddResponse("_noadd._tcp.svc.test", DnsRecordType.SRV, b => b
+            .Answer(DnsResponseBuilder.BuildSrvRdata(10, 100, 9090, "noaddr.test"), ttl: 60));
 
         DnsResult<DnsResolvedService> result = await _resolver.ResolveServiceAsync("_noadd._tcp.svc.test");
 
