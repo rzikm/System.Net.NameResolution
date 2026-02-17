@@ -93,6 +93,17 @@ public struct DnsMessageHeader
     // CD (1 bit)     - Checking Disabled (RFC 4035)
     // RCODE (4 bits) - Response code
 
+    // Wire bit positions for each DnsHeaderFlags value
+    private static readonly (DnsHeaderFlags Flag, int Bit)[] FlagBitMap =
+    [
+        (DnsHeaderFlags.AuthoritativeAnswer, 10),
+        (DnsHeaderFlags.Truncation, 9),
+        (DnsHeaderFlags.RecursionDesired, 8),
+        (DnsHeaderFlags.RecursionAvailable, 7),
+        (DnsHeaderFlags.AuthenticData, 5),
+        (DnsHeaderFlags.CheckingDisabled, 4),
+    ];
+
     private ushort EncodeFlagsWord()
     {
         ushort word = 0;
@@ -104,29 +115,12 @@ public struct DnsMessageHeader
 
         word |= (ushort)(((int)OpCode & 0xF) << 11);
 
-        if (Flags.HasFlag(DnsHeaderFlags.AuthoritativeAnswer))
+        foreach ((DnsHeaderFlags flag, int bit) in FlagBitMap)
         {
-            word |= 1 << 10;
-        }
-        if (Flags.HasFlag(DnsHeaderFlags.Truncation))
-        {
-            word |= 1 << 9;
-        }
-        if (Flags.HasFlag(DnsHeaderFlags.RecursionDesired))
-        {
-            word |= 1 << 8;
-        }
-        if (Flags.HasFlag(DnsHeaderFlags.RecursionAvailable))
-        {
-            word |= 1 << 7;
-        }
-        if (Flags.HasFlag(DnsHeaderFlags.AuthenticData))
-        {
-            word |= 1 << 5;
-        }
-        if (Flags.HasFlag(DnsHeaderFlags.CheckingDisabled))
-        {
-            word |= 1 << 4;
+            if (Flags.HasFlag(flag))
+            {
+                word |= (ushort)(1 << bit);
+            }
         }
 
         word |= (ushort)((int)ResponseCode & 0xF);
@@ -143,29 +137,12 @@ public struct DnsMessageHeader
         responseCode = (DnsResponseCode)(word & 0xF);
 
         flags = DnsHeaderFlags.None;
-        if ((word & (1 << 10)) != 0)
+        foreach ((DnsHeaderFlags flag, int bit) in FlagBitMap)
         {
-            flags |= DnsHeaderFlags.AuthoritativeAnswer;
-        }
-        if ((word & (1 << 9)) != 0)
-        {
-            flags |= DnsHeaderFlags.Truncation;
-        }
-        if ((word & (1 << 8)) != 0)
-        {
-            flags |= DnsHeaderFlags.RecursionDesired;
-        }
-        if ((word & (1 << 7)) != 0)
-        {
-            flags |= DnsHeaderFlags.RecursionAvailable;
-        }
-        if ((word & (1 << 5)) != 0)
-        {
-            flags |= DnsHeaderFlags.AuthenticData;
-        }
-        if ((word & (1 << 4)) != 0)
-        {
-            flags |= DnsHeaderFlags.CheckingDisabled;
+            if ((word & (1 << bit)) != 0)
+            {
+                flags |= flag;
+            }
         }
     }
 }

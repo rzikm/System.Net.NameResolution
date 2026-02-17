@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Threading;
 
 namespace System.Net;
 
@@ -100,10 +101,9 @@ public sealed class DnsQueryResult : IDisposable
 
     public void Dispose()
     {
-        byte[]? buf = _pooledBuffer;
+        byte[]? buf = Interlocked.Exchange(ref _pooledBuffer, null);
         if (buf != null)
         {
-            _pooledBuffer = null;
             ArrayPool<byte>.Shared.Return(buf);
         }
     }

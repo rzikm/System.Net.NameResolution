@@ -529,16 +529,16 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
 
     private static void WriteUInt16BE(MemoryStream ms, ushort value)
     {
-        ms.WriteByte((byte)(value >> 8));
-        ms.WriteByte((byte)(value & 0xFF));
+        Span<byte> buf = stackalloc byte[2];
+        BinaryPrimitives.WriteUInt16BigEndian(buf, value);
+        ms.Write(buf);
     }
 
     private static void WriteUInt32BE(MemoryStream ms, uint value)
     {
-        ms.WriteByte((byte)(value >> 24));
-        ms.WriteByte((byte)((value >> 16) & 0xFF));
-        ms.WriteByte((byte)((value >> 8) & 0xFF));
-        ms.WriteByte((byte)(value & 0xFF));
+        Span<byte> buf = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(buf, value);
+        ms.Write(buf);
     }
 
     public async ValueTask DisposeAsync()

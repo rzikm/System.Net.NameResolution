@@ -48,48 +48,47 @@ public class DnsResolver : IAsyncDisposable, IDisposable
 
         if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetwork)
         {
-            (byte[] responseBuf, int responseLength) = await SendQueryAsync(hostName, DnsRecordType.A, cancellationToken);
-            try
+            (DnsResponseCode rcode, DateTimeOffset? negExpires) =
+                await QueryAndCollectAddressesAsync(hostName, DnsRecordType.A, now, results, cancellationToken);
+            if (rcode != DnsResponseCode.NoError)
             {
-                (DnsResponseCode rcode, DateTimeOffset? negExpires) = CollectAddresses(responseBuf.AsSpan(0, responseLength), now, results);
-                if (rcode != DnsResponseCode.NoError)
-                {
-                    worstResponseCode = rcode;
-                    negativeCacheExpires = negExpires;
-                }
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(responseBuf);
+                worstResponseCode = rcode;
+                negativeCacheExpires = negExpires;
             }
         }
 
         if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetworkV6)
         {
-            (byte[] responseBuf, int responseLength) = await SendQueryAsync(hostName, DnsRecordType.AAAA, cancellationToken);
-            try
+            (DnsResponseCode rcode, DateTimeOffset? negExpires) =
+                await QueryAndCollectAddressesAsync(hostName, DnsRecordType.AAAA, now, results, cancellationToken);
+            if (rcode != DnsResponseCode.NoError && worstResponseCode == DnsResponseCode.NoError)
             {
-                (DnsResponseCode rcode, DateTimeOffset? negExpires) = CollectAddresses(responseBuf.AsSpan(0, responseLength), now, results);
-                if (rcode != DnsResponseCode.NoError && worstResponseCode == DnsResponseCode.NoError)
-                {
-                    worstResponseCode = rcode;
-                    negativeCacheExpires = negExpires;
-                }
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(responseBuf);
+                worstResponseCode = rcode;
+                negativeCacheExpires = negExpires;
             }
         }
 
-        // If we got any addresses, treat as success regardless of individual query codes
-        // (e.g., A succeeds but AAAA returns NODATA for Unspecified)
         if (results.Count > 0)
         {
             return new DnsResult<DnsResolvedAddress>(DnsResponseCode.NoError, results.ToArray());
         }
 
         return new DnsResult<DnsResolvedAddress>(worstResponseCode, [], negativeCacheExpires);
+    }
+
+    private async Task<(DnsResponseCode, DateTimeOffset?)> QueryAndCollectAddressesAsync(
+        string hostName, DnsRecordType type, DateTimeOffset now,
+        List<DnsResolvedAddress> results, CancellationToken ct)
+    {
+        (byte[] responseBuf, int responseLength) = await SendQueryAsync(hostName, type, ct);
+        try
+        {
+            return CollectAddresses(responseBuf.AsSpan(0, responseLength), now, results);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(responseBuf);
+        }
     }
 
     /// <summary>
@@ -156,25 +155,26 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                 {
                     break;
                 }
+
+                IPAddress? address = null;
                 if (record.TryParseARecord(out DnsARecordData a))
                 {
-                    string name = record.Name.ToString();
-                    if (!additionalAddresses.ContainsKey(name))
-                    {
-                        additionalAddresses[name] = new List<DnsResolvedAddress>();
-                    }
-                    additionalAddresses[name].Add(new DnsResolvedAddress(
-                        a.ToIPAddress(), now + TimeSpan.FromSeconds(record.TimeToLive)));
+                    address = a.ToIPAddress();
                 }
                 else if (record.TryParseAAAARecord(out DnsAAAARecordData aaaa))
                 {
-                    string name = record.Name.ToString();
-                    if (!additionalAddresses.ContainsKey(name))
+                    address = aaaa.ToIPAddress();
+                }
+
+                if (address != null)
+                {
+                    string recordName = record.Name.ToString();
+                    if (!additionalAddresses.TryGetValue(recordName, out List<DnsResolvedAddress>? list))
                     {
-                        additionalAddresses[name] = new List<DnsResolvedAddress>();
+                        list = new List<DnsResolvedAddress>();
+                        additionalAddresses[recordName] = list;
                     }
-                    additionalAddresses[name].Add(new DnsResolvedAddress(
-                        aaaa.ToIPAddress(), now + TimeSpan.FromSeconds(record.TimeToLive)));
+                    list.Add(new DnsResolvedAddress(address, now + TimeSpan.FromSeconds(record.TimeToLive)));
                 }
             }
 
@@ -234,18 +234,15 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         IReadOnlyList<IPEndPoint> servers = GetServers();
         Debug.Assert(servers.Count > 0, "GetServers should return at least one server.");
 
-        Exception? lastException = null;
-
-        // ownership of the buffer is passed to the caller
-        byte[] responseBuffer;
-
         byte[] queryBytes = ArrayPool<byte>.Shared.Rent(MaxUdpResponseSize);
         try
         {
             ushort queryId = (ushort)RandomNumberGenerator.GetInt32(ushort.MaxValue + 1);
             int queryLength = WriteDnsRequestMessage(queryId, name, type, queryBytes);
+            ReadOnlyMemory<byte> query = queryBytes.AsMemory(0, queryLength);
 
-            responseBuffer = ArrayPool<byte>.Shared.Rent(MaxUdpResponseSize);
+            byte[] responseBuffer = ArrayPool<byte>.Shared.Rent(MaxUdpResponseSize);
+            Exception? lastException = null;
 
             foreach (IPEndPoint server in servers)
             {
@@ -253,76 +250,36 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                 {
                     try
                     {
-                        int responseLength = await SendUdpQueryAsync(
-                            queryBytes.AsMemory(0, queryLength), server, responseBuffer, ct);
+                        int responseLength = await SendUdpQueryAsync(query, server, responseBuffer, ct);
 
-                        // Validate response is a well-formed DNS message
-                        if (!DnsMessageHeader.TryRead(responseBuffer.AsSpan(0, responseLength), out DnsMessageHeader header))
+                        ResponseValidation validation = ValidateResponse(
+                            responseBuffer.AsSpan(0, responseLength), queryId, name, type,
+                            out Exception? validationError);
+
+                        if (validation == ResponseValidation.Retry)
                         {
-                            lastException = new InvalidDataException("DNS response too short to contain a valid header.");
                             continue;
                         }
 
-                        if (!header.IsResponse)
+                        if (validation == ResponseValidation.RetryWithError)
                         {
-                            lastException = new InvalidDataException("DNS response has QR=0 (not a response).");
+                            lastException = validationError;
                             continue;
                         }
 
-                        if (header.Id != queryId)
+                        if (validation == ResponseValidation.TcpFallback)
                         {
-                            continue; // ignore mismatched response, retry
-                        }
+                            (byte[]? tcpBuffer, int tcpLength, Exception? tcpError) =
+                                await TryTcpFallbackAsync(query, server, ct);
 
-                        // Validate response echoes back the same question
-                        if (!ValidateResponseQuestion(responseBuffer.AsSpan(0, responseLength), header, name, type))
-                        {
-                            lastException = new InvalidDataException("DNS response question does not match the query.");
+                            if (tcpBuffer != null)
+                            {
+                                ArrayPool<byte>.Shared.Return(responseBuffer);
+                                return (tcpBuffer, tcpLength);
+                            }
+
+                            lastException = tcpError;
                             continue;
-                        }
-
-                        if (header.ResponseCode == DnsResponseCode.ServerFailure)
-                        {
-                            lastException = new InvalidOperationException($"DNS server returned {header.ResponseCode}");
-                            continue;
-                        }
-
-                        // TCP fallback if response is truncated
-                        if (header.Flags.HasFlag(DnsHeaderFlags.Truncation))
-                        {
-                            try
-                            {
-                                byte[] tcpBuffer = ArrayPool<byte>.Shared.Rent(MaxTcpResponseSize);
-                                try
-                                {
-                                    int tcpLength = await SendTcpQueryAsync(
-                                        queryBytes.AsMemory(0, queryLength), server, tcpBuffer, ct);
-
-                                    // Return the original UDP buffer and use the TCP buffer instead
-                                    ArrayPool<byte>.Shared.Return(responseBuffer);
-                                    responseBuffer = tcpBuffer;
-                                    return (responseBuffer, tcpLength);
-                                }
-                                catch
-                                {
-                                    ArrayPool<byte>.Shared.Return(tcpBuffer);
-                                    throw;
-                                }
-                            }
-                            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                            {
-                                throw;
-                            }
-                            catch (OperationCanceledException)
-                            {
-                                lastException = new TimeoutException("DNS TCP query timed out.");
-                                continue;
-                            }
-                            catch (Exception ex)
-                            {
-                                lastException = ex;
-                                continue;
-                            }
                         }
 
                         return (responseBuffer, responseLength);
@@ -333,7 +290,6 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                     }
                     catch (OperationCanceledException)
                     {
-                        // Per-attempt timeout (not user cancellation)
                         lastException = new TimeoutException("DNS query timed out.");
                     }
                     catch (Exception ex)
@@ -342,20 +298,106 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                     }
                 }
             }
+
+            ArrayPool<byte>.Shared.Return(responseBuffer);
+
+            if (lastException is TimeoutException)
+            {
+                throw lastException;
+            }
+
+            throw new InvalidOperationException("All DNS servers failed.", lastException);
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(queryBytes);
         }
+    }
 
-        ArrayPool<byte>.Shared.Return(responseBuffer);
+    private enum ResponseValidation
+    {
+        Ok,
+        Retry,
+        RetryWithError,
+        TcpFallback,
+    }
 
-        if (lastException is TimeoutException)
+    /// <summary>
+    /// Validates a UDP DNS response. Returns the validation result indicating
+    /// whether the response is acceptable, should be retried, or needs TCP fallback.
+    /// On RetryWithError, <paramref name="error"/> contains the specific exception.
+    /// </summary>
+    private static ResponseValidation ValidateResponse(
+        ReadOnlySpan<byte> response, ushort expectedId, string expectedName, DnsRecordType expectedType,
+        out Exception? error)
+    {
+        error = null;
+
+        if (!DnsMessageHeader.TryRead(response, out DnsMessageHeader header))
         {
-            throw lastException;
+            error = new InvalidDataException("DNS response too short to contain a valid header.");
+            return ResponseValidation.RetryWithError;
         }
 
-        throw new InvalidOperationException("All DNS servers failed.", lastException);
+        if (!header.IsResponse)
+        {
+            error = new InvalidDataException("DNS response has QR=0 (not a response).");
+            return ResponseValidation.RetryWithError;
+        }
+
+        if (header.Id != expectedId)
+        {
+            return ResponseValidation.Retry;
+        }
+
+        if (!ValidateResponseQuestion(response, header, expectedName, expectedType))
+        {
+            error = new InvalidDataException("DNS response question does not match the query.");
+            return ResponseValidation.RetryWithError;
+        }
+
+        if (header.ResponseCode == DnsResponseCode.ServerFailure)
+        {
+            error = new InvalidOperationException($"DNS server returned {header.ResponseCode}");
+            return ResponseValidation.RetryWithError;
+        }
+
+        if (header.Flags.HasFlag(DnsHeaderFlags.Truncation))
+        {
+            return ResponseValidation.TcpFallback;
+        }
+
+        return ResponseValidation.Ok;
+    }
+
+    /// <summary>
+    /// Attempts to resend the query over TCP. Returns the buffer and length on success,
+    /// or null buffer with the exception on failure.
+    /// </summary>
+    private async Task<(byte[]? Buffer, int Length, Exception? Error)> TryTcpFallbackAsync(
+        ReadOnlyMemory<byte> query, IPEndPoint server, CancellationToken ct)
+    {
+        byte[] tcpBuffer = ArrayPool<byte>.Shared.Rent(MaxTcpResponseSize);
+        try
+        {
+            int tcpLength = await SendTcpQueryAsync(query, server, tcpBuffer, ct);
+            return (tcpBuffer, tcpLength, null);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            ArrayPool<byte>.Shared.Return(tcpBuffer);
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            ArrayPool<byte>.Shared.Return(tcpBuffer);
+            return (null, 0, new TimeoutException("DNS TCP query timed out."));
+        }
+        catch (Exception ex)
+        {
+            ArrayPool<byte>.Shared.Return(tcpBuffer);
+            return (null, 0, ex);
+        }
     }
 
     private int WriteDnsRequestMessage(ushort queryId, string name, DnsRecordType type, Span<byte> destination)
