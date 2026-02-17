@@ -7,7 +7,7 @@ public class DnsMessageHeaderTests
     [Fact]
     public void StandardQuery_SetsDefaults()
     {
-        var header = new DnsMessageHeader { Id = 0x1234, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
+        DnsMessageHeader header = new() { Id = 0x1234, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
 
         Assert.Equal(0x1234, header.Id);
         Assert.False(header.IsResponse);
@@ -23,7 +23,7 @@ public class DnsMessageHeaderTests
     [Fact]
     public void RoundTrip_StandardQuery()
     {
-        var original = new DnsMessageHeader { Id = 0xABCD, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 2 };
+        DnsMessageHeader original = new() { Id = 0xABCD, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 2 };
         Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
 
         Assert.True(original.TryWrite(buffer));
@@ -43,10 +43,10 @@ public class DnsMessageHeaderTests
     [Fact]
     public void RoundTrip_ResponseWithAllFlags()
     {
-        var flags = DnsHeaderFlags.AuthoritativeAnswer | DnsHeaderFlags.RecursionDesired
+        DnsHeaderFlags flags = DnsHeaderFlags.AuthoritativeAnswer | DnsHeaderFlags.RecursionDesired
             | DnsHeaderFlags.RecursionAvailable | DnsHeaderFlags.AuthenticData;
 
-        var original = new DnsMessageHeader
+        DnsMessageHeader original = new()
         {
             Id = 0x5678,
             IsResponse = true,
@@ -75,7 +75,7 @@ public class DnsMessageHeaderTests
 
         foreach (DnsResponseCode rcode in Enum.GetValues<DnsResponseCode>())
         {
-            var original = new DnsMessageHeader { IsResponse = true, ResponseCode = rcode };
+            DnsMessageHeader original = new() { IsResponse = true, ResponseCode = rcode };
 
             Assert.True(original.TryWrite(buffer));
             Assert.True(DnsMessageHeader.TryRead(buffer, out var parsed));
@@ -90,7 +90,7 @@ public class DnsMessageHeaderTests
 
         foreach (DnsOpCode opcode in Enum.GetValues<DnsOpCode>())
         {
-            var original = new DnsMessageHeader { OpCode = opcode };
+            DnsMessageHeader original = new() { OpCode = opcode };
 
             Assert.True(original.TryWrite(buffer));
             Assert.True(DnsMessageHeader.TryRead(buffer, out var parsed));
@@ -101,7 +101,7 @@ public class DnsMessageHeaderTests
     [Fact]
     public void TryWrite_BufferTooSmall_ReturnsFalse()
     {
-        var header = new DnsMessageHeader { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
+        DnsMessageHeader header = new() { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Span<byte> buffer = stackalloc byte[11]; // one byte short
         Assert.False(header.TryWrite(buffer));
     }
@@ -127,7 +127,7 @@ public class DnsMessageHeaderTests
             0x00, 0x00, // ARCOUNT=0
         ];
 
-        var header = new DnsMessageHeader { Id = 0x1234, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
+        DnsMessageHeader header = new() { Id = 0x1234, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
         Assert.True(header.TryWrite(buffer));
         Assert.True(buffer.SequenceEqual(expected));
@@ -147,7 +147,7 @@ public class DnsMessageHeaderTests
             0x00, 0x00, // ARCOUNT=0
         ];
 
-        var header = new DnsMessageHeader
+        DnsMessageHeader header = new()
         {
             Id = 1,
             IsResponse = true,

@@ -26,9 +26,9 @@ public class DnsMessageWriterTests
         ];
 
         Span<byte> buffer = stackalloc byte[512];
-        var writer = new DnsMessageWriter(buffer);
+        DnsMessageWriter writer = new(buffer);
 
-        var header = new DnsMessageHeader { Id = 0x1234, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
+        DnsMessageHeader header = new() { Id = 0x1234, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Assert.True(writer.TryWriteHeader(in header));
 
         Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
@@ -44,9 +44,9 @@ public class DnsMessageWriterTests
     public void WriteMultipleQuestions_ProducesCorrectOutput()
     {
         Span<byte> buffer = stackalloc byte[512];
-        var writer = new DnsMessageWriter(buffer);
+        DnsMessageWriter writer = new(buffer);
 
-        var header = new DnsMessageHeader { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 2 };
+        DnsMessageHeader header = new() { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 2 };
         Assert.True(writer.TryWriteHeader(in header));
 
         Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
@@ -66,8 +66,8 @@ public class DnsMessageWriterTests
     public void BufferTooSmall_ForHeader_ReturnsFalse()
     {
         Span<byte> buffer = stackalloc byte[11]; // 1 short
-        var writer = new DnsMessageWriter(buffer);
-        var header = new DnsMessageHeader { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
+        DnsMessageWriter writer = new(buffer);
+        DnsMessageHeader header = new() { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Assert.False(writer.TryWriteHeader(in header));
         Assert.Equal(0, writer.BytesWritten);
     }
@@ -82,11 +82,11 @@ public class DnsMessageWriterTests
             3, (byte)'c', (byte)'o', (byte)'m', 0,
             3, (byte)'w', (byte)'w', (byte)'w', 0xC0, 0x00 // www + pointer to example.com
         ];
-        var compressedName = new DnsEncodedName(message, 13);
+        DnsEncodedName compressedName = new(message, 13);
 
         Span<byte> buffer = stackalloc byte[512];
-        var writer = new DnsMessageWriter(buffer);
-        var header = new DnsMessageHeader { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
+        DnsMessageWriter writer = new(buffer);
+        DnsMessageHeader header = new() { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Assert.True(writer.TryWriteHeader(in header));
         Assert.True(writer.TryWriteQuestion(compressedName, DnsRecordType.A));
 
@@ -105,9 +105,9 @@ public class DnsMessageWriterTests
     public void BufferTooSmall_ForQuestion_ReturnsFalse()
     {
         Span<byte> buffer = stackalloc byte[14]; // header fits (12), question needs more
-        var writer = new DnsMessageWriter(buffer);
+        DnsMessageWriter writer = new(buffer);
 
-        var header = new DnsMessageHeader { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
+        DnsMessageHeader header = new() { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Assert.True(writer.TryWriteHeader(in header));
 
         Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];

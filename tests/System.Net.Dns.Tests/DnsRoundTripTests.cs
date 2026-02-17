@@ -21,9 +21,9 @@ public class DnsRoundTripTests : IAsyncLifetime
 
     private async Task<byte[]> SendQueryAsync(byte[] query)
     {
-        using var udp = new UdpClient();
+        using UdpClient udp = new();
         await udp.SendAsync(query, _server.EndPoint);
-        var result = await udp.ReceiveAsync();
+        UdpReceiveResult result = await udp.ReceiveAsync();
         return result.Buffer;
     }
 
@@ -107,7 +107,7 @@ public class DnsRoundTripTests : IAsyncLifetime
         DnsEncodedName.TryEncode(name, nameBuf, out var encodedName, out _);
 
         Span<byte> queryBuf = stackalloc byte[512];
-        var writer = new DnsMessageWriter(queryBuf);
+        DnsMessageWriter writer = new(queryBuf);
         writer.TryWriteHeader(new DnsMessageHeader { Id = id, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 });
         writer.TryWriteQuestion(encodedName, type);
         return queryBuf[..writer.BytesWritten].ToArray();

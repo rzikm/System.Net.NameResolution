@@ -147,7 +147,7 @@ public class DnsMessageReaderTests
         Assert.True(cname.Name.Equals("www.example.com"));
 
         // The CNAME RDATA contains a compression pointer to "example.com"
-        var cnameTarget = new DnsEncodedName(cname.Message, cname.DataOffset);
+        DnsEncodedName cnameTarget = new(cname.Message, cname.DataOffset);
         Assert.True(cnameTarget.Equals("example.com"));
 
         // A answer
@@ -239,7 +239,7 @@ public class DnsMessageReaderTests
         // The record can be read structurally (pointer is just 2 bytes to skip)
         Assert.True(reader.TryReadRecord(out var record));
         // But the name's labels cannot be enumerated
-        var enumerator = record.Name.EnumerateLabels();
+        DnsLabelEnumerator enumerator = record.Name.EnumerateLabels();
         Assert.False(enumerator.MoveNext());
     }
 
@@ -248,9 +248,9 @@ public class DnsMessageReaderTests
     {
         // Build a query with the writer, then parse it with the reader
         Span<byte> buffer = stackalloc byte[512];
-        var writer = new DnsMessageWriter(buffer);
+        DnsMessageWriter writer = new(buffer);
 
-        var header = new DnsMessageHeader { Id = 0xBEEF, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 2 };
+        DnsMessageHeader header = new() { Id = 0xBEEF, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 2 };
         writer.TryWriteHeader(in header);
 
         Span<byte> nameBuf = stackalloc byte[DnsEncodedName.MaxEncodedLength];

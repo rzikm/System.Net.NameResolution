@@ -12,7 +12,7 @@ public class DnsEncodedNameTests
     public void TryCreate_ValidName_ProducesExpectedBytes(string name, byte[] expected)
     {
         Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
-        var status = DnsEncodedName.TryEncode(name, buffer, out _, out int bytesWritten);
+        OperationStatus status = DnsEncodedName.TryEncode(name, buffer, out _, out int bytesWritten);
 
         Assert.Equal(OperationStatus.Done, status);
         Assert.Equal(expected.Length, bytesWritten);
@@ -25,7 +25,7 @@ public class DnsEncodedNameTests
     public void TryCreate_Root_ProducesSingleZeroByte(string name)
     {
         Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
-        var status = DnsEncodedName.TryEncode(name, buffer, out _, out int bytesWritten);
+        OperationStatus status = DnsEncodedName.TryEncode(name, buffer, out _, out int bytesWritten);
 
         Assert.Equal(OperationStatus.Done, status);
         Assert.Equal(1, bytesWritten);
@@ -50,7 +50,7 @@ public class DnsEncodedNameTests
     {
         string longLabel = new string('a', 64) + ".com"; // 64 > 63 max
         Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
-        var status = DnsEncodedName.TryEncode(longLabel, buffer, out _, out _);
+        OperationStatus status = DnsEncodedName.TryEncode(longLabel, buffer, out _, out _);
         Assert.Equal(OperationStatus.InvalidData, status);
     }
 
@@ -59,7 +59,7 @@ public class DnsEncodedNameTests
     {
         string maxLabel = new string('a', 63) + ".com";
         Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
-        var status = DnsEncodedName.TryEncode(maxLabel, buffer, out _, out _);
+        OperationStatus status = DnsEncodedName.TryEncode(maxLabel, buffer, out _, out _);
         Assert.Equal(OperationStatus.Done, status);
     }
 
@@ -67,7 +67,7 @@ public class DnsEncodedNameTests
     public void TryCreate_ConsecutiveDots_ReturnsInvalidData()
     {
         Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
-        var status = DnsEncodedName.TryEncode("example..com", buffer, out _, out _);
+        OperationStatus status = DnsEncodedName.TryEncode("example..com", buffer, out _, out _);
         Assert.Equal(OperationStatus.InvalidData, status);
     }
 
@@ -80,7 +80,7 @@ public class DnsEncodedNameTests
         // Add one more to overflow
         string name = string.Join(".", Enumerable.Repeat("aaaa", 64));
         Span<byte> buffer = stackalloc byte[512]; // oversized buffer
-        var status = DnsEncodedName.TryEncode(name, buffer, out _, out _);
+        OperationStatus status = DnsEncodedName.TryEncode(name, buffer, out _, out _);
         Assert.Equal(OperationStatus.InvalidData, status);
     }
 
@@ -88,7 +88,7 @@ public class DnsEncodedNameTests
     public void TryCreate_DestinationTooSmall_ReturnsDestinationTooSmall()
     {
         Span<byte> buffer = stackalloc byte[5]; // too small for "example.com"
-        var status = DnsEncodedName.TryEncode("example.com", buffer, out _, out _);
+        OperationStatus status = DnsEncodedName.TryEncode("example.com", buffer, out _, out _);
         Assert.Equal(OperationStatus.DestinationTooSmall, status);
     }
 
@@ -170,8 +170,8 @@ public class DnsEncodedNameTests
         Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
         DnsEncodedName.TryEncode("a.bb.ccc", nameBuffer, out var name, out _);
 
-        var labels = new List<string>();
-        foreach (var label in name.EnumerateLabels())
+        List<string> labels = new();
+        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
             labels.Add(Encoding.ASCII.GetString(label));
 
         Assert.Equal(["a", "bb", "ccc"], labels);
@@ -183,8 +183,8 @@ public class DnsEncodedNameTests
         Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
         DnsEncodedName.TryEncode(".", nameBuffer, out var name, out _);
 
-        var labels = new List<string>();
-        foreach (var label in name.EnumerateLabels())
+        List<string> labels = new();
+        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
             labels.Add(Encoding.ASCII.GetString(label));
 
         Assert.Empty(labels);
@@ -203,7 +203,7 @@ public class DnsEncodedNameTests
             3, (byte)'w', (byte)'w', (byte)'w', 0xC0, 0x00
         ];
 
-        var name = new DnsEncodedName(message, 13);
+        DnsEncodedName name = new(message, 13);
         Assert.True(name.Equals("www.example.com"));
         Assert.Equal("www.example.com", name.ToString());
     }
@@ -219,7 +219,7 @@ public class DnsEncodedNameTests
             3, (byte)'f', (byte)'o', (byte)'o', 0xC0, 0x00
         ];
 
-        var name = new DnsEncodedName(message, 5);
+        DnsEncodedName name = new(message, 5);
         Assert.True(name.Equals("foo.com"));
     }
 
@@ -242,7 +242,7 @@ public class DnsEncodedNameTests
             3, (byte)'w', (byte)'w', (byte)'w', 0xC0, 0x00
         ];
 
-        var name = new DnsEncodedName(message, 13);
+        DnsEncodedName name = new(message, 13);
         Assert.Equal(6, name.GetWireLength());
     }
 
@@ -251,10 +251,10 @@ public class DnsEncodedNameTests
     {
         // Pointer at offset 0 that points to itself
         byte[] message = [0xC0, 0x00];
-        var name = new DnsEncodedName(message, 0);
+        DnsEncodedName name = new(message, 0);
         // Should not infinite-loop; max hop limit kicks in
-        var labels = new List<string>();
-        foreach (var label in name.EnumerateLabels())
+        List<string> labels = new();
+        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
             labels.Add(Encoding.ASCII.GetString(label));
         // Enumerator returns false after max hops
         Assert.Empty(labels);
@@ -266,9 +266,9 @@ public class DnsEncodedNameTests
         // Pointer at offset 0 that points forward to offset 2 (past itself, but within buffer)
         // Offset 2 has another pointer back to offset 0 → loop
         byte[] message = [0xC0, 0x02, 0xC0, 0x00];
-        var name = new DnsEncodedName(message, 0);
-        var labels = new List<string>();
-        foreach (var label in name.EnumerateLabels())
+        DnsEncodedName name = new(message, 0);
+        List<string> labels = new();
+        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
             labels.Add(Encoding.ASCII.GetString(label));
         Assert.Empty(labels);
     }
@@ -278,7 +278,7 @@ public class DnsEncodedNameTests
     {
         // Multiple pointers chaining: offset 0 → offset 2 → offset 4 → root
         byte[] message = [0xC0, 0x02, 0xC0, 0x04, 0x01, (byte)'a', 0x00];
-        var name = new DnsEncodedName(message, 0);
+        DnsEncodedName name = new(message, 0);
         Assert.True(name.Equals("a"));
     }
 
@@ -287,8 +287,8 @@ public class DnsEncodedNameTests
     {
         // Pointer to offset 0xFF, far beyond the 4-byte buffer
         byte[] message = [0xC0, 0xFF, 0x00, 0x00];
-        var name = new DnsEncodedName(message, 0);
-        var enumerator = name.EnumerateLabels();
+        DnsEncodedName name = new(message, 0);
+        DnsLabelEnumerator enumerator = name.EnumerateLabels();
         Assert.False(enumerator.MoveNext());
     }
 

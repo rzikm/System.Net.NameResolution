@@ -13,8 +13,8 @@ public class DnsRecordTypeTests
         // Question name: q.test = \x01q\x04test\x00 (8 bytes)
         byte[] questionName = [0x01, (byte)'q', 0x04, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0x00];
 
-        using var ms = new MemoryStream();
-        var bw = new BinaryWriter(ms);
+        using MemoryStream ms = new();
+        BinaryWriter bw = new(ms);
 
         // Header (12 bytes)
         bw.Write((byte)0x00); bw.Write((byte)0x01); // ID=1
@@ -52,12 +52,12 @@ public class DnsRecordTypeTests
     public void ARecord_ParsesCorrectly()
     {
         byte[] rdata = [192, 168, 1, 1];
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.A, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.A, rdata));
 
         Assert.True(record.TryParseARecord(out var a));
         Assert.Equal(rdata, a.AddressBytes.ToArray());
 
-        var ip = a.ToIPAddress();
+        IPAddress ip = a.ToIPAddress();
         Assert.Equal("192.168.1.1", ip.ToString());
     }
 
@@ -66,7 +66,7 @@ public class DnsRecordTypeTests
     {
         // ::1 in 16 bytes
         byte[] rdata = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.AAAA, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.AAAA, rdata));
 
         Assert.True(record.TryParseAAAARecord(out var aaaa));
         Assert.Equal(rdata, aaaa.AddressBytes.ToArray());
@@ -79,7 +79,7 @@ public class DnsRecordTypeTests
         // RDATA: target.test = \x06target\x04test\x00
         byte[] rdata = [0x06, (byte)'t', (byte)'a', (byte)'r', (byte)'g', (byte)'e', (byte)'t',
                         0x04, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0x00];
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.CNAME, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.CNAME, rdata));
 
         Assert.True(record.TryParseCNameRecord(out var cname));
         Assert.True(cname.CName.Equals("target.test"));
@@ -92,7 +92,7 @@ public class DnsRecordTypeTests
         byte[] rdata = [0x00, 0x0A, // preference=10
                         0x04, (byte)'m', (byte)'a', (byte)'i', (byte)'l',
                         0x04, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0x00];
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.MX, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.MX, rdata));
 
         Assert.True(record.TryParseMxRecord(out var mx));
         Assert.Equal(10, mx.Preference);
@@ -108,7 +108,7 @@ public class DnsRecordTypeTests
                         0x1F, 0x90, // port=8080
                         0x03, (byte)'s', (byte)'r', (byte)'v',
                         0x04, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0x00];
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.SRV, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.SRV, rdata));
 
         Assert.True(record.TryParseSrvRecord(out var srv));
         Assert.Equal(10, srv.Priority);
@@ -121,12 +121,12 @@ public class DnsRecordTypeTests
     public void TxtRecord_SingleString()
     {
         byte[] rdata = [0x05, (byte)'h', (byte)'e', (byte)'l', (byte)'l', (byte)'o'];
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.TXT, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.TXT, rdata));
 
         Assert.True(record.TryParseTxtRecord(out var txt));
 
-        var strings = new List<string>();
-        foreach (var s in txt.EnumerateStrings())
+        List<string> strings = new();
+        foreach (ReadOnlySpan<byte> s in txt.EnumerateStrings())
             strings.Add(Encoding.ASCII.GetString(s));
 
         Assert.Equal(["hello"], strings);
@@ -137,12 +137,12 @@ public class DnsRecordTypeTests
     {
         byte[] rdata = [0x03, (byte)'a', (byte)'b', (byte)'c',
                         0x02, (byte)'d', (byte)'e'];
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.TXT, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.TXT, rdata));
 
         Assert.True(record.TryParseTxtRecord(out var txt));
 
-        var strings = new List<string>();
-        foreach (var s in txt.EnumerateStrings())
+        List<string> strings = new();
+        foreach (ReadOnlySpan<byte> s in txt.EnumerateStrings())
             strings.Add(Encoding.ASCII.GetString(s));
 
         Assert.Equal(["abc", "de"], strings);
@@ -154,7 +154,7 @@ public class DnsRecordTypeTests
         // RDATA: host.test
         byte[] rdata = [0x04, (byte)'h', (byte)'o', (byte)'s', (byte)'t',
                         0x04, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0x00];
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.PTR, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.PTR, rdata));
 
         Assert.True(record.TryParsePtrRecord(out var ptr));
         Assert.True(ptr.Name.Equals("host.test"));
@@ -166,7 +166,7 @@ public class DnsRecordTypeTests
         // RDATA: ns1.test
         byte[] rdata = [0x03, (byte)'n', (byte)'s', (byte)'1',
                         0x04, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0x00];
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.NS, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.NS, rdata));
 
         Assert.True(record.TryParseNsRecord(out var ns));
         Assert.True(ns.Name.Equals("ns1.test"));
@@ -186,7 +186,7 @@ public class DnsRecordTypeTests
         BinaryPrimitives.WriteUInt32BigEndian(fixedFields.AsSpan(16), 86400);
 
         byte[] rdata = [.. mname, .. rname, .. fixedFields];
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.SOA, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.SOA, rdata));
 
         Assert.True(record.TryParseSoaRecord(out var soa));
         Assert.True(soa.PrimaryNameServer.Equals("ns.test"));
@@ -211,7 +211,7 @@ public class DnsRecordTypeTests
     {
         // Use a valid A record, but try to parse as every other type
         byte[] rdata = [192, 168, 1, 1];
-        var record = GetAnswerRecord(BuildResponse(actualType, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(actualType, rdata));
 
         // Try parsing as each type — only the matching one should succeed
         if (actualType != DnsRecordType.A) Assert.False(record.TryParseARecord(out _));
@@ -230,7 +230,7 @@ public class DnsRecordTypeTests
         // Build a response where the CNAME RDATA uses a compression pointer
         // back to the question name ("q.test")
         byte[] rdata = [0xC0, 0x0C]; // pointer to offset 12 = question name
-        var record = GetAnswerRecord(BuildResponse(DnsRecordType.CNAME, rdata));
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.CNAME, rdata));
 
         Assert.True(record.TryParseCNameRecord(out var cname));
         Assert.True(cname.CName.Equals("q.test"));

@@ -37,10 +37,10 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
 
     public static LoopbackDnsServer Start()
     {
-        var udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-        var ep = (IPEndPoint)udp.Client.LocalEndPoint!;
+        UdpClient udp = new(new IPEndPoint(IPAddress.Loopback, 0));
+        IPEndPoint ep = (IPEndPoint)udp.Client.LocalEndPoint!;
         // Listen on TCP on the same port
-        var tcp = new TcpListener(IPAddress.Loopback, ep.Port);
+        TcpListener tcp = new(IPAddress.Loopback, ep.Port);
         tcp.Start();
         return new LoopbackDnsServer(udp, tcp, ep);
     }
@@ -157,11 +157,11 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     private static byte[] BuildSrvResponse(ushort queryId, byte[] questionName,
         (string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses)[] entries)
     {
-        using var ms = new MemoryStream();
+        using MemoryStream ms = new();
 
         // Count additional A/AAAA records
         int additionalCount = 0;
-        foreach (var e in entries)
+        foreach ((string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses) e in entries)
             if (e.Addresses != null)
                 additionalCount += e.Addresses.Length;
 
@@ -179,7 +179,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         WriteUInt16BE(ms, 1); // CLASS=IN
 
         // SRV answer records
-        foreach (var e in entries)
+        foreach ((string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses) e in entries)
         {
             // Name: pointer to question name
             ms.WriteByte(0xC0);
@@ -197,14 +197,14 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         }
 
         // Additional section: A/AAAA records for targets
-        foreach (var e in entries)
+        foreach ((string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses) e in entries)
         {
             if (e.Addresses == null) continue;
             byte[] targetNameBytes = EncodeName(e.Target);
-            foreach (var addr in e.Addresses)
+            foreach (IPAddress addr in e.Addresses)
             {
                 ms.Write(targetNameBytes);
-                var addrType = addr.AddressFamily == AddressFamily.InterNetworkV6
+                DnsRecordType addrType = addr.AddressFamily == AddressFamily.InterNetworkV6
                     ? DnsRecordType.AAAA : DnsRecordType.A;
                 WriteUInt16BE(ms, (ushort)addrType);
                 WriteUInt16BE(ms, 1); // CLASS=IN
@@ -236,9 +236,9 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         {
             while (!ct.IsCancellationRequested)
             {
-                var result = await _udp.ReceiveAsync(ct);
-                var query = result.Buffer;
-                var remote = result.RemoteEndPoint;
+                UdpReceiveResult result = await _udp.ReceiveAsync(ct);
+                byte[] query = result.Buffer;
+                IPEndPoint remote = result.RemoteEndPoint;
                 Interlocked.Increment(ref _requestCount);
 
                 byte[] response = ProcessQuery(query);
@@ -349,10 +349,10 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         if (pos + 4 > query.Length)
             return BuildErrorResponse(queryId, questionName, 0, DnsResponseCode.FormatError);
 
-        var qType = (DnsRecordType)BinaryPrimitives.ReadUInt16BigEndian(query.AsSpan(pos));
+        DnsRecordType qType = (DnsRecordType)BinaryPrimitives.ReadUInt16BigEndian(query.AsSpan(pos));
 
         // Decode the name for lookup
-        var encodedName = new DnsEncodedName(query, nameStart);
+        DnsEncodedName encodedName = new(query, nameStart);
         string nameStr = encodedName.ToString();
 
         if (_responses.TryGetValue((nameStr.ToLowerInvariant(), qType), out var builder))
@@ -365,7 +365,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     internal static byte[] BuildSimpleResponse(ushort queryId, byte[] questionName,
         DnsRecordType type, byte[] rdata, uint ttl)
     {
-        using var ms = new MemoryStream();
+        using MemoryStream ms = new();
         // Header
         WriteUInt16BE(ms, queryId);
         WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
@@ -396,10 +396,10 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     {
         byte[] cnameEncoded = EncodeName(cname);
         byte[] addrBytes = address.GetAddressBytes();
-        var addrType = address.AddressFamily == AddressFamily.InterNetworkV6
+        DnsRecordType addrType = address.AddressFamily == AddressFamily.InterNetworkV6
             ? DnsRecordType.AAAA : DnsRecordType.A;
 
-        using var ms = new MemoryStream();
+        using MemoryStream ms = new();
         // Header
         WriteUInt16BE(ms, queryId);
         WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
@@ -455,7 +455,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     internal static byte[] BuildErrorResponse(ushort queryId, byte[] questionName,
         DnsRecordType type, DnsResponseCode rcode)
     {
-        using var ms = new MemoryStream();
+        using MemoryStream ms = new();
         // Header: QR=1, RD=1, RA=1, RCODE
         ushort flags = (ushort)(0x8180 | (ushort)rcode);
         WriteUInt16BE(ms, queryId);
@@ -490,7 +490,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     private static byte[] BuildResponseWithSoa(ushort queryId, byte[] questionName,
         DnsRecordType type, DnsResponseCode rcode, string soaName, uint soaMinTtl)
     {
-        using var ms = new MemoryStream();
+        using MemoryStream ms = new();
         ushort flags = (ushort)(0x8180 | (ushort)rcode);
         WriteUInt16BE(ms, queryId);
         WriteUInt16BE(ms, flags);
