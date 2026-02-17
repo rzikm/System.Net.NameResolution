@@ -254,6 +254,18 @@ public readonly ref struct DnsName
         out DnsName result,
         out int bytesWritten);
 
+    // --- Read path: parse from a wire-format buffer ---
+
+    // Parses a DNS name from a wire-format buffer at the given offset.
+    // Validates that the name is well-formed (valid label lengths, no truncation).
+    // The buffer is retained by the returned DnsName to support compression pointer resolution.
+    // bytesConsumed is the number of bytes consumed at offset (not following compression pointers).
+    public static bool TryParse(
+        ReadOnlySpan<byte> buffer,
+        int offset,
+        out DnsName name,
+        out int bytesConsumed);
+
     // --- Shared: works identically for parsed and created names ---
 
     // Compares this name to a dotted string representation (e.g., "example.com").
