@@ -100,6 +100,7 @@ public readonly ref struct DnsEncodedName
 
         // If the name contains non-ASCII characters, convert to ACE (Punycode) form
         // per RFC 5891 (IDNA 2008) before wire encoding.
+        // TODO: Switch to span-based IdnMapping.TryGetAscii when available (.NET 11+)
         string? aceName = null;
         if (ContainsNonAscii(name))
         {
@@ -206,6 +207,7 @@ public readonly ref struct DnsEncodedName
     public bool Equals(ReadOnlySpan<char> name)
     {
         // If the name contains non-ASCII characters, convert to ACE for comparison
+        // TODO: Switch to span-based IdnMapping.TryGetAscii when available (.NET 11+)
         string? aceName = null;
         if (ContainsNonAscii(name))
         {
@@ -312,6 +314,7 @@ public readonly ref struct DnsEncodedName
         }
 
         // If any label was ACE-encoded, try to convert the whole name to Unicode
+        // TODO: Switch to span-based IdnMapping.TryGetUnicode when available (.NET 11+)
         if (hasAce)
         {
             try
@@ -373,6 +376,7 @@ public readonly ref struct DnsEncodedName
         if (hasAce)
         {
             // Need to compute actual Unicode length
+            // TODO: Switch to span-based IdnMapping.TryGetUnicode when available (.NET 11+)
             Span<char> chars = length <= 256 ? stackalloc char[length] : new char[length];
             TryDecodeAscii(chars, out int asciiWritten);
             try
@@ -407,6 +411,7 @@ public readonly ref struct DnsEncodedName
         TryDecodeAscii(chars, out int written);
 
         // Try to convert ACE labels to Unicode
+        // TODO: Switch to span-based IdnMapping.TryGetUnicode when available (.NET 11+)
         string ascii = new string(chars[..written]);
         try
         {
