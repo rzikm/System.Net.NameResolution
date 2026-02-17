@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.IO;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 
 namespace System.Net;
 
@@ -239,7 +240,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
 
         Span<byte> querySpan = stackalloc byte[MaxUdpResponseSize];
         DnsMessageWriter writer = new DnsMessageWriter(querySpan);
-        ushort queryId = (ushort)Random.Shared.Next(0, ushort.MaxValue + 1);
+        ushort queryId = (ushort)RandomNumberGenerator.GetInt32(ushort.MaxValue + 1);
         writer.TryWriteHeader(new DnsMessageHeader { Id = queryId, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 });
         writer.TryWriteQuestion(encodedName, type);
 
