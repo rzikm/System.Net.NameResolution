@@ -580,9 +580,9 @@ public ref struct DnsLabelEnumerator
                     return false;
                 }
                 int pointer = ((b & 0x3F) << 8) | _buffer[_pos + 1];
-                if (pointer >= _buffer.Length)
+                if (pointer >= _pos)
                 {
-                    return false; // invalid pointer target
+                    return false; // only backwards jumps allowed
                 }
                 _pos = pointer;
                 if (++_hops > MaxPointerHops)

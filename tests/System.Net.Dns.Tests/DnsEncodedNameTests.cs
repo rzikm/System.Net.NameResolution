@@ -275,11 +275,11 @@ public class DnsEncodedNameTests
     }
 
     [Fact]
-    public void CompressionPointer_ChainedPointers_StopsAtMaxHops()
+    public void CompressionPointer_ChainedPointers_ResolvesCorrectly()
     {
-        // Multiple pointers chaining: offset 0 → offset 2 → offset 4 → root
-        byte[] message = [0xC0, 0x02, 0xC0, 0x04, 0x01, (byte)'a', 0x00];
-        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
+        // Chained backwards pointers: offset 5 → offset 3 → offset 0 → label "a" + root
+        byte[] message = [0x01, (byte)'a', 0x00, 0xC0, 0x00, 0xC0, 0x03];
+        Assert.True(DnsEncodedName.TryParse(message, 5, out DnsEncodedName name, out _));
         Assert.True(name.Equals("a"));
     }
 
@@ -288,6 +288,26 @@ public class DnsEncodedNameTests
     {
         // Pointer to offset 0xFF, far beyond the 4-byte buffer
         byte[] message = [0xC0, 0xFF, 0x00, 0x00];
+        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
+        DnsLabelEnumerator enumerator = name.EnumerateLabels();
+        Assert.False(enumerator.MoveNext());
+    }
+
+    [Fact]
+    public void CompressionPointer_ForwardJump_ReturnsFalse()
+    {
+        // Forward pointer: offset 0 points to offset 2 (forward, not allowed)
+        byte[] message = [0xC0, 0x02, 0x01, (byte)'a', 0x00];
+        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
+        DnsLabelEnumerator enumerator = name.EnumerateLabels();
+        Assert.False(enumerator.MoveNext());
+    }
+
+    [Fact]
+    public void CompressionPointer_SelfJump_ReturnsFalse()
+    {
+        // Self-referencing pointer: offset 0 points to offset 0
+        byte[] message = [0xC0, 0x00, 0x00];
         Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
         DnsLabelEnumerator enumerator = name.EnumerateLabels();
         Assert.False(enumerator.MoveNext());
