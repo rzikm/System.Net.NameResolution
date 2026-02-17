@@ -176,15 +176,15 @@ public enum DnsOpCode : byte
 }
 
 [Flags]
-public enum DnsHeaderFlags : ushort
+public enum DnsHeaderFlags : byte
 {
     None                = 0,
-    AuthoritativeAnswer = 1 << 0,  // AA
-    Truncation          = 1 << 1,  // TC
-    RecursionDesired    = 1 << 2,  // RD
-    RecursionAvailable  = 1 << 3,  // RA
-    AuthenticData       = 1 << 4,  // AD (RFC 4035)
-    CheckingDisabled    = 1 << 5,  // CD (RFC 4035)
+    AuthoritativeAnswer = 1 << 6,  // AA — wire bit 10
+    Truncation          = 1 << 5,  // TC — wire bit 9
+    RecursionDesired    = 1 << 4,  // RD — wire bit 8
+    RecursionAvailable  = 1 << 3,  // RA — wire bit 7
+    AuthenticData       = 1 << 1,  // AD — wire bit 5 (RFC 4035)
+    CheckingDisabled    = 1 << 0,  // CD — wire bit 4 (RFC 4035)
 }
 ```
 
@@ -216,7 +216,7 @@ This layout drives the enum sizing decisions:
 
 - **`DnsOpCode : byte`** — 4-bit field (bits 1–4), fits in a byte.
 - **`DnsResponseCode : ushort`** — 4-bit field (bits 12–15) in the base header, but EDNS0 extends it to 12 bits via the OPT record, so `ushort` provides room for future extension.
-- **`DnsHeaderFlags : ushort`** — 6 individual flag bits (AA, TC, RD, RA, AD, CD) packed into a `[Flags]` enum. Uses logical bit positions 0–5 (not wire positions); the encode/decode methods map between them.
+- **`DnsHeaderFlags : byte`** — 6 individual flag bits (AA, TC, RD, RA, AD, CD) packed into a `[Flags]` enum. Values are the wire bit positions shifted right by 4, so the enum fits in a `byte`. Encoding shifts left by 4 to restore wire positions; decoding masks and shifts right by 4.
 
 ```csharp
 namespace System.Net;

@@ -317,6 +317,10 @@ public readonly ref struct DnsEncodedName
             }
             if ((b & 0xC0) == 0xC0)
             {
+                if (pos + 1 >= _buffer.Length)
+                {
+                    break; // truncated pointer
+                }
                 return pos + 2 - _offset; // compression pointer
             }
             if (b > 63)

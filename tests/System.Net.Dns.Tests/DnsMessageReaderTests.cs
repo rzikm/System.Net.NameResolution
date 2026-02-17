@@ -308,4 +308,69 @@ public class DnsMessageReaderTests
         sw.Stop();
         Assert.True(sw.ElapsedMilliseconds < 1000, $"Took {sw.ElapsedMilliseconds}ms");
     }
+
+    [Fact]
+    public void TryCreate_ExactHeaderSize_Succeeds()
+    {
+        // A 12-byte buffer is the minimum valid header
+        byte[] data = [0x00, 0x01, 0x81, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        Assert.True(DnsMessageReader.TryCreate(data, out DnsMessageReader reader));
+        Assert.Equal(0x0001, reader.Header.Id);
+        Assert.True(reader.Header.IsResponse);
+    }
+
+    [Fact]
+    public void TryReadQuestion_TruncatedTypeClass_ReturnsFalse()
+    {
+        // Header says QDCOUNT=1, valid name follows, but TYPE/CLASS bytes are missing
+        byte[] data =
+        [
+            0x00, 0x01, 0x81, 0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // header
+            0x01, (byte)'a', 0x00, // name "a" (3 bytes), no TYPE/CLASS
+        ];
+        DnsMessageReader.TryCreate(data, out DnsMessageReader reader);
+        Assert.False(reader.TryReadQuestion(out _));
+    }
+
+    [Fact]
+    public void TryReadRecord_TruncatedFixedFields_ReturnsFalse()
+    {
+        // Header says ANCOUNT=1, valid name but TYPE/CLASS/TTL/RDLENGTH truncated
+        byte[] data =
+        [
+            0x00, 0x01, 0x81, 0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, // header
+            0x01, (byte)'a', 0x00, // name "a" (3 bytes)
+            0x00, 0x01, // TYPE=A, but missing CLASS/TTL/RDLENGTH
+        ];
+        DnsMessageReader.TryCreate(data, out DnsMessageReader reader);
+        Assert.False(reader.TryReadRecord(out _));
+    }
+
+    [Fact]
+    public void TryReadQuestion_AtEndOfBuffer_ReturnsFalse()
+    {
+        // Header says QDCOUNT=1, but no data follows after the 12-byte header
+        byte[] data = [0x00, 0x01, 0x81, 0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        DnsMessageReader.TryCreate(data, out DnsMessageReader reader);
+        Assert.False(reader.TryReadQuestion(out _));
+    }
+
+    [Fact]
+    public void TryReadRecord_AtEndOfBuffer_ReturnsFalse()
+    {
+        // Header says ANCOUNT=1, but no data follows after the 12-byte header
+        byte[] data = [0x00, 0x01, 0x81, 0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        DnsMessageReader.TryCreate(data, out DnsMessageReader reader);
+        Assert.False(reader.TryReadRecord(out _));
+    }
+
+    [Fact]
+    public void TryReadRecord_NoMoreRecords_ReturnsFalse()
+    {
+        // Parse a valid response, read the single answer, then try to read another
+        DnsMessageReader.TryCreate(ExampleComAResponse, out DnsMessageReader reader);
+        reader.TryReadQuestion(out _);
+        Assert.True(reader.TryReadRecord(out _));
+        Assert.False(reader.TryReadRecord(out _)); // no more records
+    }
 }

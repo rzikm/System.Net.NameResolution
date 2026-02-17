@@ -235,4 +235,47 @@ public class DnsResolverTests : IAsyncLifetime
         await Assert.ThrowsAsync<ArgumentException>(
             () => _resolver.ResolveAddressesAsync(""));
     }
+
+    [Fact]
+    public async Task Disposed_ResolveService_Throws()
+    {
+        DnsResolver resolver = new(new DnsResolverOptions { Servers = [_server.EndPoint] });
+        await resolver.DisposeAsync();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => resolver.ResolveServiceAsync("_http._tcp.svc.test"));
+    }
+
+    [Fact]
+    public async Task Disposed_Query_Throws()
+    {
+        DnsResolver resolver = new(new DnsResolverOptions { Servers = [_server.EndPoint] });
+        await resolver.DisposeAsync();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => resolver.QueryAsync("host.test", DnsRecordType.A));
+    }
+
+    [Fact]
+    public async Task QueryResult_DoubleDispose_DoesNotThrow()
+    {
+        DnsQueryResult result = await _resolver.QueryAsync("host.test", DnsRecordType.A);
+
+        result.Dispose();
+        result.Dispose(); // second dispose should be a no-op
+    }
+
+    [Fact]
+    public async Task InvalidName_ResolveService_Throws()
+    {
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => _resolver.ResolveServiceAsync(""));
+    }
+
+    [Fact]
+    public async Task InvalidName_Query_Throws()
+    {
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => _resolver.QueryAsync("", DnsRecordType.A));
+    }
 }

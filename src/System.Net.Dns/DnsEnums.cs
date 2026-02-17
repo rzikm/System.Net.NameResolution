@@ -45,13 +45,13 @@ public enum DnsOpCode : byte
 }
 
 [Flags]
-public enum DnsHeaderFlags : ushort
+public enum DnsHeaderFlags : byte
 {
-    None = 0,
-    AuthoritativeAnswer = 1 << 0,  // AA
-    Truncation = 1 << 1,           // TC
-    RecursionDesired = 1 << 2,     // RD
-    RecursionAvailable = 1 << 3,   // RA
-    AuthenticData = 1 << 4,        // AD (RFC 4035)
-    CheckingDisabled = 1 << 5,     // CD (RFC 4035)
+    None                = 0,
+    AuthoritativeAnswer = 1 << 6,  // AA — wire bit 10
+    Truncation          = 1 << 5,  // TC — wire bit 9
+    RecursionDesired    = 1 << 4,  // RD — wire bit 8
+    RecursionAvailable  = 1 << 3,  // RA — wire bit 7
+    AuthenticData       = 1 << 1,  // AD — wire bit 5 (RFC 4035)
+    CheckingDisabled    = 1 << 0,  // CD — wire bit 4 (RFC 4035)
 }

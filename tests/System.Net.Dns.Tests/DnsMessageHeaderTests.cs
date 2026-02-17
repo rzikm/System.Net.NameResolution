@@ -161,4 +161,36 @@ public class DnsMessageHeaderTests
         Assert.True(header.TryWrite(buffer));
         Assert.True(buffer.SequenceEqual(expected));
     }
+
+    [Theory]
+    [InlineData(DnsHeaderFlags.AuthoritativeAnswer)]
+    [InlineData(DnsHeaderFlags.Truncation)]
+    [InlineData(DnsHeaderFlags.RecursionDesired)]
+    [InlineData(DnsHeaderFlags.RecursionAvailable)]
+    [InlineData(DnsHeaderFlags.AuthenticData)]
+    [InlineData(DnsHeaderFlags.CheckingDisabled)]
+    public void RoundTrip_EachFlagIndividually(DnsHeaderFlags flag)
+    {
+        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
+        DnsMessageHeader original = new() { Flags = flag };
+
+        Assert.True(original.TryWrite(buffer));
+        Assert.True(DnsMessageHeader.TryRead(buffer, out DnsMessageHeader parsed));
+        Assert.Equal(flag, parsed.Flags);
+    }
+
+    [Fact]
+    public void RoundTrip_AllFlagsCombined()
+    {
+        DnsHeaderFlags allFlags = DnsHeaderFlags.AuthoritativeAnswer | DnsHeaderFlags.Truncation
+            | DnsHeaderFlags.RecursionDesired | DnsHeaderFlags.RecursionAvailable
+            | DnsHeaderFlags.AuthenticData | DnsHeaderFlags.CheckingDisabled;
+
+        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
+        DnsMessageHeader original = new() { IsResponse = true, Flags = allFlags };
+
+        Assert.True(original.TryWrite(buffer));
+        Assert.True(DnsMessageHeader.TryRead(buffer, out DnsMessageHeader parsed));
+        Assert.Equal(allFlags, parsed.Flags);
+    }
 }

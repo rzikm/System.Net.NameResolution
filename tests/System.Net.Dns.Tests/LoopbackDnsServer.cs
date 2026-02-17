@@ -527,6 +527,113 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         return ms.ToArray();
     }
 
+    /// <summary>
+    /// Builds a response with a valid header and question echo, but with ANCOUNT set
+    /// to a value higher than the actual number of answer records in the body.
+    /// This simulates a response where the answer section is truncated/malformed.
+    /// </summary>
+    internal static byte[] BuildResponseWithMissingAnswers(ushort queryId, byte[] questionName,
+        DnsRecordType type, ushort claimedAnswerCount)
+    {
+        using MemoryStream ms = new();
+        WriteUInt16BE(ms, queryId);
+        WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
+        WriteUInt16BE(ms, 1); // QDCOUNT
+        WriteUInt16BE(ms, claimedAnswerCount); // ANCOUNT — but no actual records follow
+        WriteUInt16BE(ms, 0); // NSCOUNT
+        WriteUInt16BE(ms, 0); // ARCOUNT
+
+        // Question echo
+        ms.Write(questionName);
+        WriteUInt16BE(ms, (ushort)type);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Builds a response where the question section claims QDCOUNT questions
+    /// but the body does not contain any question data beyond the header.
+    /// </summary>
+    internal static byte[] BuildResponseWithMissingQuestions(ushort queryId, ushort claimedQuestionCount)
+    {
+        using MemoryStream ms = new();
+        WriteUInt16BE(ms, queryId);
+        WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
+        WriteUInt16BE(ms, claimedQuestionCount); // QDCOUNT — but no question data follows
+        WriteUInt16BE(ms, 0); // ANCOUNT
+        WriteUInt16BE(ms, 0); // NSCOUNT
+        WriteUInt16BE(ms, 0); // ARCOUNT
+
+        // No question body — just the 12-byte header
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Builds a response with valid question and answer, but with NSCOUNT set higher
+    /// than actual authority records present (zero).
+    /// </summary>
+    internal static byte[] BuildResponseWithMissingAuthority(ushort queryId, byte[] questionName,
+        DnsRecordType type, byte[] rdata, uint ttl, ushort claimedAuthorityCount)
+    {
+        using MemoryStream ms = new();
+        WriteUInt16BE(ms, queryId);
+        WriteUInt16BE(ms, 0x8180);
+        WriteUInt16BE(ms, 1); // QDCOUNT
+        WriteUInt16BE(ms, 1); // ANCOUNT
+        WriteUInt16BE(ms, claimedAuthorityCount); // NSCOUNT — but no authority records follow
+        WriteUInt16BE(ms, 0); // ARCOUNT
+
+        // Question echo
+        ms.Write(questionName);
+        WriteUInt16BE(ms, (ushort)type);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+
+        // One valid answer record
+        ms.WriteByte(0xC0); ms.WriteByte(0x0C); // pointer to question name
+        WriteUInt16BE(ms, (ushort)type);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+        WriteUInt32BE(ms, ttl);
+        WriteUInt16BE(ms, (ushort)rdata.Length);
+        ms.Write(rdata);
+
+        // No authority records despite NSCOUNT > 0
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Builds an NXDOMAIN response with SOA in authority, but the SOA RDATA is truncated.
+    /// </summary>
+    internal static byte[] BuildNxDomainWithTruncatedSoa(ushort queryId, byte[] questionName,
+        DnsRecordType type)
+    {
+        using MemoryStream ms = new();
+        ushort flags = (ushort)(0x8180 | (ushort)DnsResponseCode.NameError);
+        WriteUInt16BE(ms, queryId);
+        WriteUInt16BE(ms, flags);
+        WriteUInt16BE(ms, 1); // QDCOUNT
+        WriteUInt16BE(ms, 0); // ANCOUNT
+        WriteUInt16BE(ms, 1); // NSCOUNT — SOA record claimed
+        WriteUInt16BE(ms, 0); // ARCOUNT
+
+        // Question
+        ms.Write(questionName);
+        WriteUInt16BE(ms, (ushort)type);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+
+        // SOA record with RDLENGTH claiming 50 bytes but only 4 bytes present
+        byte[] soaName = EncodeName("test");
+        ms.Write(soaName);
+        WriteUInt16BE(ms, (ushort)DnsRecordType.SOA);
+        WriteUInt16BE(ms, 1); // CLASS=IN
+        WriteUInt32BE(ms, 60); // TTL
+        WriteUInt16BE(ms, 50); // RDLENGTH — but data below is shorter than 50 bytes
+        // Only write 4 bytes instead of 50
+        ms.Write(new byte[] { 0x00, 0x00, 0x00, 0x00 });
+
+        return ms.ToArray();
+    }
+
     private static void WriteUInt16BE(MemoryStream ms, ushort value)
     {
         Span<byte> buf = stackalloc byte[2];

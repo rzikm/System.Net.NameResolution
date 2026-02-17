@@ -387,4 +387,100 @@ public class DnsEncodedNameTests
     {
         Assert.False(DnsEncodedName.TryParse(ReadOnlySpan<byte>.Empty, 0, out _, out _));
     }
+
+    [Fact]
+    public void TryParse_CompressionPointerLoop_ParsesButEnumerationStops()
+    {
+        // Two pointers that point at each other: offset 0 → offset 2 → offset 0
+        // TryParse succeeds (wire format is valid: 2-byte pointer), but enumeration
+        // will stop due to loop protection.
+        byte[] buffer = [0xC0, 0x02, 0xC0, 0x00];
+        Assert.True(DnsEncodedName.TryParse(buffer, 0, out DnsEncodedName name, out int consumed));
+        Assert.Equal(2, consumed);
+
+        // Enumerating labels should stop (loop protection)
+        DnsLabelEnumerator enumerator = name.EnumerateLabels();
+        int count = 0;
+        while (enumerator.MoveNext()) count++;
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void TryParse_PointerAtEndOfBuffer_ReturnsFalse()
+    {
+        // Compression pointer with only 1 byte (missing second byte)
+        byte[] buffer = [0xC0];
+        Assert.False(DnsEncodedName.TryParse(buffer, 0, out _, out _));
+    }
+
+    [Fact]
+    public void TryParse_LabelExtendsPastBuffer_ReturnsFalse()
+    {
+        // Label says 5 bytes but buffer only has 2 more bytes after length
+        byte[] buffer = [0x05, (byte)'a', (byte)'b'];
+        Assert.False(DnsEncodedName.TryParse(buffer, 0, out _, out _));
+    }
+
+    [Fact]
+    public void TryEncode_RootName_DestinationTooSmall_ReturnsError()
+    {
+        Span<byte> buffer = Span<byte>.Empty; // 0 bytes — can't even fit root
+        OperationStatus status = DnsEncodedName.TryEncode(".", buffer, out _, out _);
+        Assert.Equal(OperationStatus.DestinationTooSmall, status);
+    }
+
+    [Fact]
+    public void TryEncode_DestinationExactlyFitsRootTerminator()
+    {
+        // Name "a" needs 3 bytes: \x01a\x00. Provide exactly 3 bytes.
+        Span<byte> buffer = stackalloc byte[3];
+        OperationStatus status = DnsEncodedName.TryEncode("a", buffer, out _, out int written);
+        Assert.Equal(OperationStatus.Done, status);
+        Assert.Equal(3, written);
+    }
+
+    [Fact]
+    public void TryEncode_DestinationTooSmallForRootTerminator()
+    {
+        // Name "a" needs 3 bytes: \x01a\x00. Only provide 2 bytes.
+        Span<byte> buffer = stackalloc byte[2];
+        OperationStatus status = DnsEncodedName.TryEncode("a", buffer, out _, out _);
+        Assert.Equal(OperationStatus.DestinationTooSmall, status);
+    }
+
+    [Fact]
+    public void TryEncode_NonAsciiCharacter_ReturnsInvalidData()
+    {
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        OperationStatus status = DnsEncodedName.TryEncode("café.test", buffer, out _, out _);
+        Assert.Equal(OperationStatus.InvalidData, status);
+    }
+
+    [Fact]
+    public void Equals_DifferentLabelCount_ReturnsFalse()
+    {
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode("a.b.c", buffer, out DnsEncodedName name, out _);
+        Assert.False(name.Equals("a.b"));
+        Assert.False(name.Equals("a.b.c.d"));
+    }
+
+    [Fact]
+    public void Equals_EmptyString_MatchesRoot()
+    {
+        Span<byte> buffer = stackalloc byte[1];
+        DnsEncodedName.TryEncode(".", buffer, out DnsEncodedName name, out _);
+        Assert.True(name.Equals(""));
+        Assert.True(name.Equals("."));
+    }
+
+    [Fact]
+    public void GetWireLength_WithCompressionPointer_ReturnsCorrectLength()
+    {
+        // "com\0" at offset 0, then pointer at offset 4
+        byte[] buffer = [3, (byte)'c', (byte)'o', (byte)'m', 0, 0xC0, 0x00];
+        DnsEncodedName name = new(buffer, 5);
+        // Wire length of a pointer is 2 bytes
+        Assert.Equal(2, name.GetWireLength());
+    }
 }

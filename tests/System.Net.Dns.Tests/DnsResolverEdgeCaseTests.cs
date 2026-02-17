@@ -1,5 +1,7 @@
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 
 namespace System.Net.Dns.Tests;
 
@@ -74,14 +76,81 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task CancellationDuringRequest_Throws()
+    public async Task CancellationDuringUdpRequest_Throws()
     {
-        // Configure a server that drops packets → the resolver will wait for timeout
-        // Cancel before the timeout fires
-        using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(50));
+        // Server accepts the UDP query but holds the response.
+        // We cancel the resolver while it waits for the UDP response.
+        using SemaphoreSlim udpReceived = new(0, 1);
+        using ManualResetEventSlim serverCanContinue = new(false);
+        using CancellationTokenSource cts = new();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => _resolver.ResolveAddressesAsync("timeout.test", cancellationToken: cts.Token));
+        await using LoopbackDnsServer server = LoopbackDnsServer.Start();
+        server.AddResponse("cancel-udp.test", DnsRecordType.A, (queryId, qName, _) =>
+        {
+            udpReceived.Release();
+            serverCanContinue.Wait(TimeSpan.FromSeconds(10));
+            return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+        });
+
+        using DnsResolver resolver = new DnsResolver(new DnsResolverOptions
+        {
+            Servers = [server.EndPoint],
+            Timeout = TimeSpan.FromSeconds(30),
+            MaxRetries = 0,
+        });
+
+        Task resolveTask = resolver.ResolveAddressesAsync("cancel-udp.test", AddressFamily.InterNetwork, cts.Token);
+
+        await udpReceived.WaitAsync(TimeSpan.FromSeconds(5));
+
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => resolveTask);
+
+        serverCanContinue.Set();
+    }
+
+    [Fact]
+    public async Task CancellationDuringTcpFallback_Throws()
+    {
+        // Server returns TC=1 on UDP. On TCP, the server accepts but holds the
+        // response until we signal. We cancel the resolver while it waits for TCP data.
+        using SemaphoreSlim tcpReceived = new(0, 1);
+        using ManualResetEventSlim serverCanContinue = new(false);
+        using CancellationTokenSource cts = new();
+
+        await using LoopbackDnsServer server = LoopbackDnsServer.Start();
+        server.AddResponse("cancel-tcp.test", DnsRecordType.A, (queryId, qName, isTcp) =>
+        {
+            if (isTcp)
+            {
+                tcpReceived.Release();
+                // Block until test signals (after cancelling the resolver)
+                serverCanContinue.Wait(TimeSpan.FromSeconds(10));
+                return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+            }
+            return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+        });
+
+        using DnsResolver resolver = new DnsResolver(new DnsResolverOptions
+        {
+            Servers = [server.EndPoint],
+            Timeout = TimeSpan.FromSeconds(30),
+            MaxRetries = 0,
+        });
+
+        Task resolveTask = resolver.ResolveAddressesAsync("cancel-tcp.test", AddressFamily.InterNetwork, cts.Token);
+
+        // Wait until the server has received the TCP query
+        await tcpReceived.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Now cancel — the resolver is blocked on ReceiveExactAsync
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => resolveTask);
+
+        // Unblock the server handler so dispose completes quickly
+        serverCanContinue.Set();
     }
 
     // --- CNAME following ---
@@ -144,6 +213,99 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _resolver.ResolveAddressesAsync("wrongquestion.test", AddressFamily.InterNetwork));
         Assert.IsType<InvalidDataException>(ex.InnerException);
+    }
+
+    // --- Malformed response bodies (valid header but corrupted record sections) ---
+
+    [Fact]
+    public async Task MalformedAnswerRecords_ThrowsInvalidDataException()
+    {
+        // Header says ANCOUNT=2 but no answer records are present after the question
+        _server.AddResponse("malformed-answers.test", DnsRecordType.A, (queryId, qName, _) =>
+            LoopbackDnsServer.BuildResponseWithMissingAnswers(queryId, qName, DnsRecordType.A, 2));
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => _resolver.ResolveAddressesAsync("malformed-answers.test", AddressFamily.InterNetwork));
+    }
+
+    [Fact]
+    public async Task MalformedQuestionSection_ThrowsInvalidOperationException()
+    {
+        // Header says QDCOUNT=2 but no question body follows the 12-byte header.
+        // This fails during response validation (question doesn't match), so we get
+        // InvalidOperationException wrapping InvalidDataException.
+        _server.AddRawResponse("malformed-questions.test", DnsRecordType.A, id =>
+            LoopbackDnsServer.BuildResponseWithMissingQuestions(id, 2));
+
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _resolver.ResolveAddressesAsync("malformed-questions.test", AddressFamily.InterNetwork));
+        Assert.IsType<InvalidDataException>(ex.InnerException);
+    }
+
+    [Fact]
+    public async Task MalformedSrvAnswerRecords_ThrowsInvalidDataException()
+    {
+        // Header says ANCOUNT=1 but no answer record data present after question
+        _server.AddResponse("malformed-srv.test", DnsRecordType.SRV, (queryId, qName, _) =>
+            LoopbackDnsServer.BuildResponseWithMissingAnswers(queryId, qName, DnsRecordType.SRV, 1));
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => _resolver.ResolveServiceAsync("malformed-srv.test"));
+    }
+
+    [Fact]
+    public async Task MalformedAuthoritySection_ThrowsInvalidDataException()
+    {
+        // Valid answer, but NSCOUNT claims authority records that aren't there.
+        // ResolveServiceAsync reads the authority section, so this tests that path.
+        _server.AddResponse("malformed-auth.test", DnsRecordType.SRV, (queryId, qName, _) =>
+            LoopbackDnsServer.BuildResponseWithMissingAuthority(queryId, qName, DnsRecordType.SRV,
+                new byte[] { 0, 0, 0, 0, 0x00, 0x50, 3, (byte)'s', (byte)'v', (byte)'c', 4, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0 },
+                300, 1));
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => _resolver.ResolveServiceAsync("malformed-auth.test"));
+    }
+
+    [Fact]
+    public async Task NxDomainWithTruncatedSoa_ThrowsInvalidDataException()
+    {
+        // NXDOMAIN response with a SOA record that has RDLENGTH > actual data.
+        // The reader should fail to parse the authority record.
+        _server.AddRawResponse("malformed-soa.test", DnsRecordType.A, id =>
+            LoopbackDnsServer.BuildNxDomainWithTruncatedSoa(id,
+                LoopbackDnsServer.EncodeName("malformed-soa.test"), DnsRecordType.A));
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => _resolver.ResolveAddressesAsync("malformed-soa.test", AddressFamily.InterNetwork));
+    }
+
+    [Fact]
+    public async Task MalformedAdditionalSection_ThrowsInvalidDataException()
+    {
+        // Build a response with ARCOUNT > 0 but no additional records.
+        // ResolveServiceAsync reads the additional section.
+        _server.AddResponse("malformed-additional.test", DnsRecordType.SRV, (queryId, qName, _) =>
+        {
+            using MemoryStream ms = new();
+            // Header: valid, with ARCOUNT=1 but no additional records
+            ms.Write([(byte)(queryId >> 8), (byte)queryId]);
+            ms.Write([0x81, 0x80]); // QR=1, RD=1, RA=1
+            ms.Write([0x00, 0x01]); // QDCOUNT=1
+            ms.Write([0x00, 0x00]); // ANCOUNT=0
+            ms.Write([0x00, 0x00]); // NSCOUNT=0
+            ms.Write([0x00, 0x01]); // ARCOUNT=1 — but no additional records follow
+
+            // Question echo
+            ms.Write(qName);
+            ms.Write([0x00, 0x21]); // QTYPE=SRV
+            ms.Write([0x00, 0x01]); // QCLASS=IN
+
+            return ms.ToArray();
+        });
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => _resolver.ResolveServiceAsync("malformed-additional.test"));
     }
 }
 
@@ -292,5 +454,134 @@ public class DnsResolverRetryTests : IAsyncLifetime
         Assert.Single(result.Records);
         Assert.Equal(IPAddress.Parse("10.0.0.42"), result.Records[0].Address);
         Assert.True(server.TcpRequestCount > 0, "Expected at least one TCP request");
+    }
+
+    [Fact]
+    public async Task TcpFallback_TcpDropsConnection_FailsOverToNextServer()
+    {
+        // Primary returns TC=1 on UDP and drops TCP connection (empty response)
+        _primary.AddResponse("tcpdrop.test", DnsRecordType.A, (queryId, qName, isTcp) =>
+            isTcp
+                ? [] // drop TCP connection
+                : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60));
+
+        // Secondary returns a normal response
+        _secondary.AddARecord("tcpdrop.test", IPAddress.Parse("10.0.0.2"));
+
+        await using DnsResolver resolver = new(new DnsResolverOptions
+        {
+            Servers = [_primary.EndPoint, _secondary.EndPoint],
+            MaxRetries = 0,
+            Timeout = TimeSpan.FromSeconds(2),
+        });
+
+        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("tcpdrop.test", AddressFamily.InterNetwork);
+        Assert.Single(result.Records);
+        Assert.Equal("10.0.0.2", result.Records[0].Address.ToString());
+    }
+
+    [Fact]
+    public async Task TcpFallback_TcpFails_RetriesOnSameServer()
+    {
+        int udpCount = 0;
+        // First UDP: TC=1, TCP drops. Second UDP: normal response.
+        _primary.AddResponse("tcpretry.test", DnsRecordType.A, (queryId, qName, isTcp) =>
+        {
+            if (isTcp)
+            {
+                return []; // drop TCP
+            }
+            udpCount++;
+            if (udpCount == 1)
+            {
+                return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+            }
+            return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+        });
+
+        await using DnsResolver resolver = new(new DnsResolverOptions
+        {
+            Servers = [_primary.EndPoint],
+            MaxRetries = 2,
+            Timeout = TimeSpan.FromSeconds(2),
+        });
+
+        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("tcpretry.test", AddressFamily.InterNetwork);
+        Assert.Single(result.Records);
+        Assert.Equal("10.0.0.1", result.Records[0].Address.ToString());
+        Assert.Equal(2, udpCount);
+    }
+
+    [Fact]
+    public async Task TcpFallback_LargeResponse_ResolvesCorrectly()
+    {
+        // Build a response larger than InitialTcpBufferSize (1024 bytes)
+        // by adding many A records to the answer section
+        int recordCount = 100; // 100 A records × ~16 bytes each > 1024
+        _primary.AddResponse("large-tcp.test", DnsRecordType.A, (queryId, qName, isTcp) =>
+        {
+            if (!isTcp)
+            {
+                return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+            }
+
+            // Build a large response with many A records
+            using MemoryStream ms = new();
+            // Header
+            ms.Write([(byte)(queryId >> 8), (byte)queryId]);
+            ms.Write([0x81, 0x80]); // QR=1, RD=1, RA=1
+            ms.Write([0x00, 0x01]); // QDCOUNT=1
+            ms.Write([(byte)(recordCount >> 8), (byte)recordCount]); // ANCOUNT
+            ms.Write([0x00, 0x00]); // NSCOUNT
+            ms.Write([0x00, 0x00]); // ARCOUNT
+
+            // Question echo
+            ms.Write(qName);
+            ms.Write([0x00, 0x01]); // QTYPE=A
+            ms.Write([0x00, 0x01]); // QCLASS=IN
+
+            // Answer records
+            for (int i = 0; i < recordCount; i++)
+            {
+                ms.Write([0xC0, 0x0C]); // pointer to question name
+                ms.Write([0x00, 0x01]); // TYPE=A
+                ms.Write([0x00, 0x01]); // CLASS=IN
+                ms.Write([0x00, 0x00, 0x01, 0x2C]); // TTL=300
+                ms.Write([0x00, 0x04]); // RDLENGTH=4
+                ms.Write([10, 0, (byte)(i / 256), (byte)(i % 256)]); // RDATA
+            }
+
+            return ms.ToArray();
+        });
+
+        await using DnsResolver resolver = new(new DnsResolverOptions
+        {
+            Servers = [_primary.EndPoint],
+            Timeout = TimeSpan.FromSeconds(5),
+        });
+
+        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("large-tcp.test", AddressFamily.InterNetwork);
+        Assert.Equal(recordCount, result.Records.Length);
+        Assert.True(_primary.TcpRequestCount > 0, "Expected at least one TCP request");
+    }
+
+    [Fact]
+    public async Task TcpFallback_AllServersFail_ThrowsInvalidOperation()
+    {
+        // Both servers return TC=1 on UDP and drop TCP
+        _primary.AddResponse("allfail-tcp.test", DnsRecordType.A, (queryId, qName, isTcp) =>
+            isTcp ? [] : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60));
+        _secondary.AddResponse("allfail-tcp.test", DnsRecordType.A, (queryId, qName, isTcp) =>
+            isTcp ? [] : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60));
+
+        await using DnsResolver resolver = new(new DnsResolverOptions
+        {
+            Servers = [_primary.EndPoint, _secondary.EndPoint],
+            MaxRetries = 0,
+            Timeout = TimeSpan.FromSeconds(2),
+        });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => resolver.ResolveAddressesAsync("allfail-tcp.test", AddressFamily.InterNetwork));
     }
 }

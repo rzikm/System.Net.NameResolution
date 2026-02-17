@@ -93,16 +93,13 @@ public struct DnsMessageHeader
     // CD (1 bit)     - Checking Disabled (RFC 4035)
     // RCODE (4 bits) - Response code
 
-    // Wire bit positions for each DnsHeaderFlags value
-    private static readonly (DnsHeaderFlags Flag, int Bit)[] FlagBitMap =
-    [
-        (DnsHeaderFlags.AuthoritativeAnswer, 10),
-        (DnsHeaderFlags.Truncation, 9),
-        (DnsHeaderFlags.RecursionDesired, 8),
-        (DnsHeaderFlags.RecursionAvailable, 7),
-        (DnsHeaderFlags.AuthenticData, 5),
-        (DnsHeaderFlags.CheckingDisabled, 4),
-    ];
+    // DnsHeaderFlags enum values are the wire bit positions shifted right by 4,
+    // so the enum fits in a byte. Encoding shifts left by 4 to restore wire positions,
+    // decoding shifts right by 4. The Z bit (wire bit 6) gap is preserved by the shift.
+    // Wire flag bits: AA(10) TC(9) RD(8) RA(7) AD(5) CD(4)
+    // Enum bits:      AA(6)  TC(5) RD(4) RA(3) AD(1) CD(0)
+    private const int FlagsShift = 4;
+    private const ushort WireFlagsMask = 0x07F0; // wire bits 10-7 and 5-4
 
     private ushort EncodeFlagsWord()
     {
@@ -114,15 +111,7 @@ public struct DnsMessageHeader
         }
 
         word |= (ushort)(((int)OpCode & 0xF) << 11);
-
-        foreach ((DnsHeaderFlags flag, int bit) in FlagBitMap)
-        {
-            if (Flags.HasFlag(flag))
-            {
-                word |= (ushort)(1 << bit);
-            }
-        }
-
+        word |= (ushort)((int)Flags << FlagsShift);
         word |= (ushort)((int)ResponseCode & 0xF);
 
         return word;
@@ -135,14 +124,6 @@ public struct DnsMessageHeader
         isResponse = (word & (1 << 15)) != 0;
         opCode = (DnsOpCode)((word >> 11) & 0xF);
         responseCode = (DnsResponseCode)(word & 0xF);
-
-        flags = DnsHeaderFlags.None;
-        foreach ((DnsHeaderFlags flag, int bit) in FlagBitMap)
-        {
-            if ((word & (1 << bit)) != 0)
-            {
-                flags |= flag;
-            }
-        }
+        flags = (DnsHeaderFlags)((word & WireFlagsMask) >> FlagsShift);
     }
 }

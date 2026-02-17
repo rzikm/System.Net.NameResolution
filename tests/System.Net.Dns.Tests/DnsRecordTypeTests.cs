@@ -235,4 +235,170 @@ public class DnsRecordTypeTests
         Assert.True(record.TryParseCNameRecord(out var cname));
         Assert.True(cname.CName.Equals("q.test"));
     }
+
+    // --- Malformed RDATA edge cases ---
+
+    [Fact]
+    public void ARecord_WrongLength_ReturnsFalse()
+    {
+        // A record requires exactly 4 bytes of RDATA
+        byte[] rdata = [192, 168, 1]; // only 3 bytes
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.A, rdata));
+        Assert.False(record.TryParseARecord(out _));
+    }
+
+    [Fact]
+    public void AAAARecord_WrongLength_ReturnsFalse()
+    {
+        // AAAA record requires exactly 16 bytes of RDATA
+        byte[] rdata = new byte[15]; // only 15 bytes
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.AAAA, rdata));
+        Assert.False(record.TryParseAAAARecord(out _));
+    }
+
+    [Fact]
+    public void CNameRecord_EmptyRdata_ReturnsFalse()
+    {
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.CNAME, []));
+        Assert.False(record.TryParseCNameRecord(out _));
+    }
+
+    [Fact]
+    public void CNameRecord_MalformedName_ReturnsFalse()
+    {
+        // RDATA with invalid label length (0x50 = 80, exceeds max 63)
+        byte[] rdata = [0x50, (byte)'a'];
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.CNAME, rdata));
+        Assert.False(record.TryParseCNameRecord(out _));
+    }
+
+    [Fact]
+    public void MxRecord_TooShortRdata_ReturnsFalse()
+    {
+        // MX requires at least 3 bytes (2 for preference + 1 for name)
+        byte[] rdata = [0x00, 0x0A]; // only 2 bytes, no exchange name
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.MX, rdata));
+        Assert.False(record.TryParseMxRecord(out _));
+    }
+
+    [Fact]
+    public void MxRecord_MalformedExchangeName_ReturnsFalse()
+    {
+        // Preference + malformed name (label length exceeds remaining)
+        byte[] rdata = [0x00, 0x0A, 0x50, (byte)'a'];
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.MX, rdata));
+        Assert.False(record.TryParseMxRecord(out _));
+    }
+
+    [Fact]
+    public void SrvRecord_TooShortRdata_ReturnsFalse()
+    {
+        // SRV requires at least 7 bytes (priority+weight+port = 6, + 1 for target name)
+        byte[] rdata = [0x00, 0x0A, 0x00, 0x14, 0x1F, 0x90]; // only 6 bytes, no target
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.SRV, rdata));
+        Assert.False(record.TryParseSrvRecord(out _));
+    }
+
+    [Fact]
+    public void SrvRecord_MalformedTargetName_ReturnsFalse()
+    {
+        // Valid fixed fields but target name label extends past RDATA
+        byte[] rdata = [0x00, 0x0A, 0x00, 0x14, 0x1F, 0x90, 0x50, (byte)'a'];
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.SRV, rdata));
+        Assert.False(record.TryParseSrvRecord(out _));
+    }
+
+    [Fact]
+    public void SoaRecord_TooShortRdata_ReturnsFalse()
+    {
+        // SOA requires at least 22 bytes
+        byte[] rdata = new byte[21];
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.SOA, rdata));
+        Assert.False(record.TryParseSoaRecord(out _));
+    }
+
+    [Fact]
+    public void SoaRecord_MalformedMname_ReturnsFalse()
+    {
+        // SOA RDATA with invalid mname label (0x50 = 80, > 63 max)
+        byte[] rdata = new byte[30];
+        rdata[0] = 0x50; // invalid label length in mname
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.SOA, rdata));
+        Assert.False(record.TryParseSoaRecord(out _));
+    }
+
+    [Fact]
+    public void SoaRecord_MalformedRname_ReturnsFalse()
+    {
+        // Valid mname but malformed rname
+        byte[] mname = [0x02, (byte)'n', (byte)'s', 0x00]; // ns.
+        byte[] rdata = new byte[mname.Length + 30];
+        mname.CopyTo(rdata, 0);
+        rdata[mname.Length] = 0x50; // invalid label length in rname
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.SOA, rdata));
+        Assert.False(record.TryParseSoaRecord(out _));
+    }
+
+    [Fact]
+    public void SoaRecord_TruncatedFixedFields_ReturnsFalse()
+    {
+        // Valid mname and rname but not enough room for the 20 bytes of fixed fields
+        byte[] mname = [0x02, (byte)'n', (byte)'s', 0x00];
+        byte[] rname = [0x05, (byte)'a', (byte)'d', (byte)'m', (byte)'i', (byte)'n', 0x00];
+        byte[] rdata = new byte[mname.Length + rname.Length + 10]; // only 10 bytes for fixed fields
+        mname.CopyTo(rdata, 0);
+        rname.CopyTo(rdata, mname.Length);
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.SOA, rdata));
+        Assert.False(record.TryParseSoaRecord(out _));
+    }
+
+    [Fact]
+    public void TxtRecord_EmptyRdata_ReturnsFalse()
+    {
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.TXT, []));
+        Assert.False(record.TryParseTxtRecord(out _));
+    }
+
+    [Fact]
+    public void TxtRecord_TruncatedString_StopsEnumerating()
+    {
+        // String length byte says 10 but only 3 bytes remain
+        byte[] rdata = [0x0A, (byte)'a', (byte)'b', (byte)'c'];
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.TXT, rdata));
+        Assert.True(record.TryParseTxtRecord(out var txt));
+
+        // Enumerator should return false (truncated string)
+        DnsTxtEnumerator enumerator = txt.EnumerateStrings();
+        Assert.False(enumerator.MoveNext());
+    }
+
+    [Fact]
+    public void PtrRecord_EmptyRdata_ReturnsFalse()
+    {
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.PTR, []));
+        Assert.False(record.TryParsePtrRecord(out _));
+    }
+
+    [Fact]
+    public void PtrRecord_MalformedName_ReturnsFalse()
+    {
+        byte[] rdata = [0x50, (byte)'a']; // invalid label length
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.PTR, rdata));
+        Assert.False(record.TryParsePtrRecord(out _));
+    }
+
+    [Fact]
+    public void NsRecord_EmptyRdata_ReturnsFalse()
+    {
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.NS, []));
+        Assert.False(record.TryParseNsRecord(out _));
+    }
+
+    [Fact]
+    public void NsRecord_MalformedName_ReturnsFalse()
+    {
+        byte[] rdata = [0x50, (byte)'a']; // invalid label length
+        DnsRecord record = GetAnswerRecord(BuildResponse(DnsRecordType.NS, rdata));
+        Assert.False(record.TryParseNsRecord(out _));
+    }
 }
