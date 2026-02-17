@@ -328,7 +328,7 @@ public ref struct DnsMessageWriter
 
 ### DnsMessageReader
 
-A ref struct that reads DNS messages from a buffer. Reads sequentially: header (parsed eagerly in constructor), then questions, then resource records (answers, authority, additional in order).
+A ref struct that reads DNS messages from a buffer. Reads sequentially: header (parsed eagerly in TryCreate), then questions, then resource records (answers, authority, additional in order).
 
 The caller uses `Header.QuestionCount`, `Header.AnswerCount`, `Header.AuthorityCount`, and `Header.AdditionalCount` to determine how many items to read and which section each record belongs to.
 
@@ -337,8 +337,9 @@ namespace System.Net;
 
 public ref struct DnsMessageReader
 {
-    // Parses the header eagerly. Fails if the buffer is too small for a valid header.
-    public DnsMessageReader(ReadOnlySpan<byte> message);
+    // Attempts to create a reader. Parses the header eagerly.
+    // Returns false if the buffer is too small for a valid header.
+    public static bool TryCreate(ReadOnlySpan<byte> message, out DnsMessageReader reader);
 
     // The parsed message header.
     public DnsMessageHeader Header { get; }
@@ -529,7 +530,7 @@ ReadOnlySpan<byte> message = buffer[..writer.BytesWritten];
 
 ```csharp
 ReadOnlySpan<byte> responseBytes = /* received from DNS server */;
-var reader = new DnsMessageReader(responseBytes);
+DnsMessageReader.TryCreate(responseBytes, out var reader);
 
 // Check response status
 if (reader.Header.ResponseCode != DnsResponseCode.NoError) { /* handle error */ }
@@ -671,7 +672,7 @@ public class DnsQueryResult : IDisposable
     public DnsHeaderFlags Flags { get; }
 
     // Full wire-format response. Parse with:
-    //   var reader = new DnsMessageReader(result.ResponseMessage.Span);
+    //   DnsMessageReader.TryCreate(result.ResponseMessage.Span, out var reader);
     public ReadOnlyMemory<byte> ResponseMessage { get; }
 
     public void Dispose();

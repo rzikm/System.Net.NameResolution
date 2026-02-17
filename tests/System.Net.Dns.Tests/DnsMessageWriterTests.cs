@@ -91,7 +91,7 @@ public class DnsMessageWriterTests
         Assert.True(writer.TryWriteQuestion(compressedName, DnsRecordType.A));
 
         // Parse the written message and verify the name was expanded
-        var reader = new DnsMessageReader(buffer[..writer.BytesWritten]);
+        DnsMessageReader.TryCreate(buffer[..writer.BytesWritten], out var reader);
         Assert.True(reader.TryReadQuestion(out var q));
         Assert.True(q.Name.Equals("www.example.com"));
 

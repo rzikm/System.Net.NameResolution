@@ -42,7 +42,7 @@ public class DnsRecordTypeTests
 
     private static DnsRecord GetAnswerRecord(byte[] response)
     {
-        var reader = new DnsMessageReader(response);
+        DnsMessageReader.TryCreate(response, out var reader);
         reader.TryReadQuestion(out _);
         reader.TryReadRecord(out var record);
         return record;

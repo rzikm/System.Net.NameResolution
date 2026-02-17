@@ -47,12 +47,7 @@ static class FuzzTargets
     /// </summary>
     public static void Reader(ReadOnlySpan<byte> data)
     {
-        DnsMessageReader reader;
-        try
-        {
-            reader = new DnsMessageReader(data);
-        }
-        catch (ArgumentException)
+        if (!DnsMessageReader.TryCreate(data, out DnsMessageReader reader))
         {
             return;
         }
@@ -182,7 +177,7 @@ static class FuzzTargets
 
                 if (writer.BytesWritten >= 12)
                 {
-                    DnsMessageReader reader = new DnsMessageReader(msgBuf[..writer.BytesWritten]);
+                    DnsMessageReader.TryCreate(msgBuf[..writer.BytesWritten], out DnsMessageReader reader);
                     if (reader.TryReadQuestion(out DnsQuestion q))
                     {
                         q.Name.ToString();
@@ -236,14 +231,9 @@ static class FuzzTargets
         if (fullWriter.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(0x5678)) &&
             fullWriter.TryWriteQuestion(encodedName, (DnsRecordType)type))
         {
-            try
+            if (DnsMessageReader.TryCreate(fullDest[..fullWriter.BytesWritten], out DnsMessageReader reader))
             {
-                DnsMessageReader reader = new DnsMessageReader(fullDest[..fullWriter.BytesWritten]);
                 reader.TryReadQuestion(out _);
-            }
-            catch (ArgumentException)
-            {
-                // Expected for very short output
             }
         }
     }
@@ -289,7 +279,7 @@ static class FuzzTargets
 
         // Read it back
         ReadOnlySpan<byte> written = msgBuf[..writer.BytesWritten];
-        DnsMessageReader reader = new DnsMessageReader(written);
+        DnsMessageReader.TryCreate(written, out DnsMessageReader reader);
 
         if (reader.Header.Id != id)
         {

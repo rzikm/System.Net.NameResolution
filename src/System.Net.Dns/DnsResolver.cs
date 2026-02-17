@@ -95,7 +95,10 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         {
             int responseLength = await SendQueryAsync(serviceName, DnsRecordType.SRV, responseBuf, cancellationToken);
             ReadOnlySpan<byte> responseSpan = responseBuf.AsSpan(0, responseLength);
-            DnsMessageReader reader = new DnsMessageReader(responseSpan);
+            if (!DnsMessageReader.TryCreate(responseSpan, out DnsMessageReader reader))
+            {
+                throw new InvalidDataException("DNS response too small for header.");
+            }
             DateTimeOffset now = DateTimeOffset.UtcNow;
 
             if (reader.Header.ResponseCode != DnsResponseCode.NoError)
@@ -197,7 +200,10 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         try
         {
             int responseLength = await SendQueryAsync(name, type, responseBuf, cancellationToken);
-            DnsMessageReader reader = new DnsMessageReader(responseBuf.AsSpan(0, responseLength));
+            if (!DnsMessageReader.TryCreate(responseBuf.AsSpan(0, responseLength), out DnsMessageReader reader))
+            {
+                throw new InvalidDataException("DNS response too small for header.");
+            }
             DnsQueryResult result = new DnsQueryResult(reader.Header.ResponseCode, reader.Header.Flags, responseBuf, responseLength);
             success = true;
             return result;
@@ -353,7 +359,10 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     private static (DnsResponseCode, DateTimeOffset?) CollectAddresses(
         ReadOnlySpan<byte> response, DateTimeOffset now, List<DnsResolvedAddress> results)
     {
-        DnsMessageReader reader = new DnsMessageReader(response);
+        if (!DnsMessageReader.TryCreate(response, out DnsMessageReader reader))
+        {
+            return (DnsResponseCode.ServerFailure, null);
+        }
         DnsResponseCode rcode = reader.Header.ResponseCode;
 
         if (rcode != DnsResponseCode.NoError)
@@ -395,7 +404,10 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     /// </summary>
     private static DateTimeOffset? ExtractNegativeCacheTtl(ReadOnlySpan<byte> response, DateTimeOffset now)
     {
-        DnsMessageReader reader = new DnsMessageReader(response);
+        if (!DnsMessageReader.TryCreate(response, out DnsMessageReader reader))
+        {
+            return null;
+        }
 
         for (int i = 0; i < reader.Header.QuestionCount; i++)
         {
@@ -434,7 +446,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
             return false;
         }
 
-        DnsMessageReader reader = new DnsMessageReader(response);
+        DnsMessageReader.TryCreate(response, out DnsMessageReader reader);
         if (!reader.TryReadQuestion(out DnsQuestion question))
         {
             return false;

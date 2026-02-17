@@ -34,7 +34,7 @@ public class DnsRoundTripTests : IAsyncLifetime
         byte[] response = await SendQueryAsync(query);
 
         // Parse response
-        var reader = new DnsMessageReader(response);
+        DnsMessageReader.TryCreate(response, out var reader);
         Assert.Equal(0x1001, reader.Header.Id);
         Assert.True(reader.Header.IsResponse);
         Assert.Equal(DnsResponseCode.NoError, reader.Header.ResponseCode);
@@ -58,7 +58,7 @@ public class DnsRoundTripTests : IAsyncLifetime
         byte[] query = BuildQuery(0x1002, "roundtrip.test", DnsRecordType.AAAA);
         byte[] response = await SendQueryAsync(query);
 
-        var reader = new DnsMessageReader(response);
+        DnsMessageReader.TryCreate(response, out var reader);
         Assert.Equal(DnsResponseCode.NoError, reader.Header.ResponseCode);
         reader.TryReadQuestion(out _);
         reader.TryReadRecord(out var record);
@@ -73,7 +73,7 @@ public class DnsRoundTripTests : IAsyncLifetime
         byte[] query = BuildQuery(0x1003, "nonexistent.test", DnsRecordType.A);
         byte[] response = await SendQueryAsync(query);
 
-        var reader = new DnsMessageReader(response);
+        DnsMessageReader.TryCreate(response, out var reader);
         Assert.Equal(DnsResponseCode.NameError, reader.Header.ResponseCode);
         Assert.Equal(0, reader.Header.AnswerCount);
     }
@@ -84,7 +84,7 @@ public class DnsRoundTripTests : IAsyncLifetime
         byte[] query = BuildQuery(0x1004, "unknown.test", DnsRecordType.A);
         byte[] response = await SendQueryAsync(query);
 
-        var reader = new DnsMessageReader(response);
+        DnsMessageReader.TryCreate(response, out var reader);
         Assert.Equal(DnsResponseCode.NameError, reader.Header.ResponseCode);
     }
 
@@ -96,7 +96,7 @@ public class DnsRoundTripTests : IAsyncLifetime
         {
             byte[] query = BuildQuery(id, "roundtrip.test", DnsRecordType.A);
             byte[] response = await SendQueryAsync(query);
-            var reader = new DnsMessageReader(response);
+            DnsMessageReader.TryCreate(response, out var reader);
             Assert.Equal(id, reader.Header.Id);
         }
     }

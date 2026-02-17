@@ -61,20 +61,28 @@ public ref struct DnsMessageReader
 
     public DnsMessageHeader Header { get; }
 
-    /// <summary>
-    /// Creates a reader over a DNS message. Parses the header eagerly.
-    /// Throws if the buffer is too small for a valid header.
-    /// </summary>
-    public DnsMessageReader(ReadOnlySpan<byte> message)
+    private DnsMessageReader(ReadOnlySpan<byte> message, DnsMessageHeader header)
     {
-        if (!DnsMessageHeader.TryRead(message, out DnsMessageHeader header))
-        {
-            throw new ArgumentException("Buffer too small for DNS header.", nameof(message));
-        }
-
         _message = message;
         _pos = DnsMessageHeader.Size;
         Header = header;
+    }
+
+    /// <summary>
+    /// Attempts to create a reader over a DNS message. Parses the header eagerly.
+    /// Returns false if the buffer is too small for a valid header.
+    /// </summary>
+    public static bool TryCreate(ReadOnlySpan<byte> message, out DnsMessageReader reader)
+    {
+        reader = default;
+
+        if (!DnsMessageHeader.TryRead(message, out DnsMessageHeader header))
+        {
+            return false;
+        }
+
+        reader = new DnsMessageReader(message, header);
+        return true;
     }
 
     /// <summary>

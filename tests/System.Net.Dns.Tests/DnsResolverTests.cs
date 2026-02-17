@@ -203,7 +203,7 @@ public class DnsResolverTests : IAsyncLifetime
         Assert.True(result.Flags.HasFlag(DnsHeaderFlags.RecursionAvailable));
 
         // Parse the raw response
-        var reader = new DnsMessageReader(result.ResponseMessage.Span);
+        DnsMessageReader.TryCreate(result.ResponseMessage.Span, out var reader);
         Assert.Equal(1, reader.Header.AnswerCount);
 
         reader.TryReadQuestion(out _);

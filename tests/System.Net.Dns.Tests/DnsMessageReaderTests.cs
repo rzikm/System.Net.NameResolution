@@ -41,7 +41,7 @@ public class DnsMessageReaderTests
     [Fact]
     public void ParseHeader_CorrectFields()
     {
-        var reader = new DnsMessageReader(ExampleComAResponse);
+        DnsMessageReader.TryCreate(ExampleComAResponse, out var reader);
 
         Assert.Equal(0x1234, reader.Header.Id);
         Assert.True(reader.Header.IsResponse);
@@ -58,7 +58,7 @@ public class DnsMessageReaderTests
     [Fact]
     public void ParseQuestion_CorrectFields()
     {
-        var reader = new DnsMessageReader(ExampleComAResponse);
+        DnsMessageReader.TryCreate(ExampleComAResponse, out var reader);
 
         Assert.True(reader.TryReadQuestion(out var question));
         Assert.True(question.Name.Equals("example.com"));
@@ -69,7 +69,7 @@ public class DnsMessageReaderTests
     [Fact]
     public void ParseAnswer_ARecord()
     {
-        var reader = new DnsMessageReader(ExampleComAResponse);
+        DnsMessageReader.TryCreate(ExampleComAResponse, out var reader);
 
         // Skip question
         Assert.True(reader.TryReadQuestion(out _));
@@ -87,7 +87,7 @@ public class DnsMessageReaderTests
     [Fact]
     public void ParseAnswer_NameUsesCompressionPointer()
     {
-        var reader = new DnsMessageReader(ExampleComAResponse);
+        DnsMessageReader.TryCreate(ExampleComAResponse, out var reader);
         reader.TryReadQuestion(out _);
         reader.TryReadRecord(out var record);
 
@@ -134,7 +134,7 @@ public class DnsMessageReaderTests
     [Fact]
     public void ParseMultipleAnswers_CnameAndA()
     {
-        var reader = new DnsMessageReader(CnameAndAResponse);
+        DnsMessageReader.TryCreate(CnameAndAResponse, out var reader);
 
         // Skip question
         Assert.True(reader.TryReadQuestion(out var q));
@@ -180,7 +180,7 @@ public class DnsMessageReaderTests
     [Fact]
     public void ParseNxdomain_ResponseCode()
     {
-        var reader = new DnsMessageReader(NxdomainResponse);
+        DnsMessageReader.TryCreate(NxdomainResponse, out var reader);
 
         Assert.Equal(DnsResponseCode.NameError, reader.Header.ResponseCode);
         Assert.Equal(0, reader.Header.AnswerCount);
@@ -193,9 +193,9 @@ public class DnsMessageReaderTests
     }
 
     [Fact]
-    public void Constructor_TooSmallBuffer_Throws()
+    public void TryCreate_TooSmallBuffer_ReturnsFalse()
     {
-        Assert.Throws<ArgumentException>(() => new DnsMessageReader(new byte[11]));
+        Assert.False(DnsMessageReader.TryCreate(new byte[11], out _));
     }
 
     [Fact]
@@ -203,7 +203,7 @@ public class DnsMessageReaderTests
     {
         // Take the valid response and truncate the RDATA
         byte[] truncated = ExampleComAResponse[..^2]; // cut off last 2 bytes of RDATA
-        var reader = new DnsMessageReader(truncated);
+        DnsMessageReader.TryCreate(truncated, out var reader);
         reader.TryReadQuestion(out _);
         Assert.False(reader.TryReadRecord(out _));
     }
@@ -217,7 +217,7 @@ public class DnsMessageReaderTests
             0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // header
             0xFF, // label length = 255, but no data follows
         ];
-        var reader = new DnsMessageReader(malformed);
+        DnsMessageReader.TryCreate(malformed, out var reader);
         Assert.False(reader.TryReadQuestion(out _));
     }
 
@@ -235,7 +235,7 @@ public class DnsMessageReaderTests
             0x00, 0x04, // RDLENGTH=4
             0x01, 0x02, 0x03, 0x04, // RDATA
         ];
-        var reader = new DnsMessageReader(malformed);
+        DnsMessageReader.TryCreate(malformed, out var reader);
         // The record can be read structurally (pointer is just 2 bytes to skip)
         Assert.True(reader.TryReadRecord(out var record));
         // But the name's labels cannot be enumerated
@@ -261,7 +261,7 @@ public class DnsMessageReaderTests
         writer.TryWriteQuestion(name2, DnsRecordType.AAAA);
 
         // Now parse
-        var reader = new DnsMessageReader(buffer[..writer.BytesWritten]);
+        DnsMessageReader.TryCreate(buffer[..writer.BytesWritten], out var reader);
         Assert.Equal(0xBEEF, reader.Header.Id);
         Assert.False(reader.Header.IsResponse);
         Assert.Equal(2, reader.Header.QuestionCount);
@@ -285,7 +285,7 @@ public class DnsMessageReaderTests
                        0x0, 0x1, 0x2c, 0x0, 0x4, 0xa, 0x0, 0x0, 0x91, 0x1];
 
         Stopwatch sw = Stopwatch.StartNew();
-        DnsMessageReader reader = new DnsMessageReader(data);
+        DnsMessageReader.TryCreate(data, out DnsMessageReader reader);
         for (int i = 0; i < reader.Header.QuestionCount && i < 32; i++)
         {
             if (!reader.TryReadQuestion(out DnsQuestion q))
