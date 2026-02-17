@@ -71,14 +71,15 @@ if (-not (Test-Path $corpusDir)) {
         exit 1
     }
     Write-Host "    Seeds generated in: $corpusDir" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "==> Seed corpus already exists at: $corpusDir" -ForegroundColor Yellow
 }
 
 # Step 3: Instrument the target assembly
 Write-Host "==> Instrumenting System.Net.Dns.dll..." -ForegroundColor Cyan
-sharpfuzz $targetDll
-if ($LASTEXITCODE -ne 0) {
+$output = sharpfuzz $targetDll
+if ($LASTEXITCODE -ne 0 -and $output -notmatch "already instrumented") {
     Write-Error "Failed to instrument System.Net.Dns.dll. Ensure 'sharpfuzz' CLI tool is installed: dotnet tool install --global SharpFuzz.CommandLine"
     exit 1
 }
