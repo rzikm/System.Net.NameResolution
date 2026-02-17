@@ -147,7 +147,7 @@ public class DnsMessageReaderTests
         Assert.True(cname.Name.Equals("www.example.com"));
 
         // The CNAME RDATA contains a compression pointer to "example.com"
-        var cnameTarget = new DnsName(cname.Message, cname.DataOffset);
+        var cnameTarget = new DnsEncodedName(cname.Message, cname.DataOffset);
         Assert.True(cnameTarget.Equals("example.com"));
 
         // A answer
@@ -253,11 +253,11 @@ public class DnsMessageReaderTests
         var header = DnsMessageHeader.CreateStandardQuery(id: 0xBEEF, questionCount: 2);
         writer.TryWriteHeader(in header);
 
-        Span<byte> nameBuf = stackalloc byte[DnsName.MaxEncodedLength];
-        DnsName.TryCreate("example.com", nameBuf, out var name1, out _);
+        Span<byte> nameBuf = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode("example.com", nameBuf, out var name1, out _);
         writer.TryWriteQuestion(name1, DnsRecordType.A);
 
-        DnsName.TryCreate("example.org", nameBuf, out var name2, out _);
+        DnsEncodedName.TryEncode("example.org", nameBuf, out var name2, out _);
         writer.TryWriteQuestion(name2, DnsRecordType.AAAA);
 
         // Now parse

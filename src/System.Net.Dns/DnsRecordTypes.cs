@@ -31,9 +31,9 @@ public readonly ref struct DnsAAAARecordData
 
 public readonly ref struct DnsCNameRecordData
 {
-    public DnsName CName { get; }
+    public DnsEncodedName CName { get; }
 
-    internal DnsCNameRecordData(DnsName cname)
+    internal DnsCNameRecordData(DnsEncodedName cname)
     {
         CName = cname;
     }
@@ -42,9 +42,9 @@ public readonly ref struct DnsCNameRecordData
 public readonly ref struct DnsMxRecordData
 {
     public ushort Preference { get; }
-    public DnsName Exchange { get; }
+    public DnsEncodedName Exchange { get; }
 
-    internal DnsMxRecordData(ushort preference, DnsName exchange)
+    internal DnsMxRecordData(ushort preference, DnsEncodedName exchange)
     {
         Preference = preference;
         Exchange = exchange;
@@ -56,9 +56,9 @@ public readonly ref struct DnsSrvRecordData
     public ushort Priority { get; }
     public ushort Weight { get; }
     public ushort Port { get; }
-    public DnsName Target { get; }
+    public DnsEncodedName Target { get; }
 
-    internal DnsSrvRecordData(ushort priority, ushort weight, ushort port, DnsName target)
+    internal DnsSrvRecordData(ushort priority, ushort weight, ushort port, DnsEncodedName target)
     {
         Priority = priority;
         Weight = weight;
@@ -69,15 +69,15 @@ public readonly ref struct DnsSrvRecordData
 
 public readonly ref struct DnsSoaRecordData
 {
-    public DnsName PrimaryNameServer { get; }
-    public DnsName ResponsibleMailbox { get; }
+    public DnsEncodedName PrimaryNameServer { get; }
+    public DnsEncodedName ResponsibleMailbox { get; }
     public uint SerialNumber { get; }
     public uint RefreshInterval { get; }
     public uint RetryInterval { get; }
     public uint ExpireLimit { get; }
     public uint MinimumTtl { get; }
 
-    internal DnsSoaRecordData(DnsName primaryNameServer, DnsName responsibleMailbox,
+    internal DnsSoaRecordData(DnsEncodedName primaryNameServer, DnsEncodedName responsibleMailbox,
         uint serialNumber, uint refreshInterval, uint retryInterval,
         uint expireLimit, uint minimumTtl)
     {
@@ -139,9 +139,9 @@ public ref struct DnsTxtEnumerator
 
 public readonly ref struct DnsPtrRecordData
 {
-    public DnsName Name { get; }
+    public DnsEncodedName Name { get; }
 
-    internal DnsPtrRecordData(DnsName name)
+    internal DnsPtrRecordData(DnsEncodedName name)
     {
         Name = name;
     }
@@ -149,9 +149,9 @@ public readonly ref struct DnsPtrRecordData
 
 public readonly ref struct DnsNsRecordData
 {
-    public DnsName Name { get; }
+    public DnsEncodedName Name { get; }
 
-    internal DnsNsRecordData(DnsName name)
+    internal DnsNsRecordData(DnsEncodedName name)
     {
         Name = name;
     }
@@ -190,7 +190,7 @@ public static class DnsRecordExtensions
         {
             return false;
         }
-        if (!DnsName.TryParse(record.Message, record.DataOffset, out DnsName cname, out _))
+        if (!DnsEncodedName.TryParse(record.Message, record.DataOffset, out DnsEncodedName cname, out _))
         {
             return false;
         }
@@ -206,7 +206,7 @@ public static class DnsRecordExtensions
             return false;
         }
         ushort preference = BinaryPrimitives.ReadUInt16BigEndian(record.Data);
-        if (!DnsName.TryParse(record.Message, record.DataOffset + 2, out DnsName exchange, out _))
+        if (!DnsEncodedName.TryParse(record.Message, record.DataOffset + 2, out DnsEncodedName exchange, out _))
         {
             return false;
         }
@@ -224,7 +224,7 @@ public static class DnsRecordExtensions
         ushort priority = BinaryPrimitives.ReadUInt16BigEndian(record.Data);
         ushort weight = BinaryPrimitives.ReadUInt16BigEndian(record.Data[2..]);
         ushort port = BinaryPrimitives.ReadUInt16BigEndian(record.Data[4..]);
-        if (!DnsName.TryParse(record.Message, record.DataOffset + 6, out DnsName target, out _))
+        if (!DnsEncodedName.TryParse(record.Message, record.DataOffset + 6, out DnsEncodedName target, out _))
         {
             return false;
         }
@@ -240,13 +240,13 @@ public static class DnsRecordExtensions
             return false;
         }
 
-        if (!DnsName.TryParse(record.Message, record.DataOffset, out DnsName mname, out int mnameLen))
+        if (!DnsEncodedName.TryParse(record.Message, record.DataOffset, out DnsEncodedName mname, out int mnameLen))
         {
             return false;
         }
 
         int rnameOffset = record.DataOffset + mnameLen;
-        if (!DnsName.TryParse(record.Message, rnameOffset, out DnsName rname, out int rnameLen))
+        if (!DnsEncodedName.TryParse(record.Message, rnameOffset, out DnsEncodedName rname, out int rnameLen))
         {
             return false;
         }
@@ -285,7 +285,7 @@ public static class DnsRecordExtensions
         {
             return false;
         }
-        if (!DnsName.TryParse(record.Message, record.DataOffset, out DnsName ptr, out _))
+        if (!DnsEncodedName.TryParse(record.Message, record.DataOffset, out DnsEncodedName ptr, out _))
         {
             return false;
         }
@@ -300,7 +300,7 @@ public static class DnsRecordExtensions
         {
             return false;
         }
-        if (!DnsName.TryParse(record.Message, record.DataOffset, out DnsName ns, out _))
+        if (!DnsEncodedName.TryParse(record.Message, record.DataOffset, out DnsEncodedName ns, out _))
         {
             return false;
         }

@@ -103,13 +103,13 @@ public class DnsRoundTripTests : IAsyncLifetime
 
     private static byte[] BuildQuery(ushort id, string name, DnsRecordType type)
     {
-        Span<byte> nameBuf = stackalloc byte[DnsName.MaxEncodedLength];
-        DnsName.TryCreate(name, nameBuf, out var dnsName, out _);
+        Span<byte> nameBuf = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode(name, nameBuf, out var encodedName, out _);
 
         Span<byte> queryBuf = stackalloc byte[512];
         var writer = new DnsMessageWriter(queryBuf);
         writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(id: id));
-        writer.TryWriteQuestion(dnsName, type);
+        writer.TryWriteQuestion(encodedName, type);
         return queryBuf[..writer.BytesWritten].ToArray();
     }
 }

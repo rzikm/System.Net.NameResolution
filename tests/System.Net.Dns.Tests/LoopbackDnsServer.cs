@@ -198,8 +198,8 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
 
     internal static byte[] EncodeName(string name)
     {
-        Span<byte> buf = stackalloc byte[DnsName.MaxEncodedLength];
-        DnsName.TryCreate(name, buf, out _, out int written);
+        Span<byte> buf = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode(name, buf, out _, out int written);
         return buf[..written].ToArray();
     }
 
@@ -260,8 +260,8 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         var qType = (DnsRecordType)BinaryPrimitives.ReadUInt16BigEndian(query.AsSpan(pos));
 
         // Decode the name for lookup
-        var dnsName = new DnsName(query, nameStart);
-        string nameStr = dnsName.ToString();
+        var encodedName = new DnsEncodedName(query, nameStart);
+        string nameStr = encodedName.ToString();
 
         if (_responses.TryGetValue((nameStr.ToLowerInvariant(), qType), out var builder))
             return builder(queryId, questionName);

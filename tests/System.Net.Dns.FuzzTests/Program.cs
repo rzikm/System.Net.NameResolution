@@ -63,7 +63,7 @@ static class FuzzTargets
             {
                 break;
             }
-            // ToString() internally calls GetFormattedLength() + TryFormat()
+            // ToString() internally calls GetFormattedLength() + TryDecode()
             question.Name.ToString();
             question.Name.Equals("example.com");
         }
@@ -122,7 +122,7 @@ static class FuzzTargets
     }
 
     /// <summary>
-    /// Fuzzes DnsName creation from arbitrary strings via TryCreate,
+    /// Fuzzes DnsEncodedName creation from arbitrary strings via TryCreate,
     /// then exercises all public name methods.
     /// </summary>
     public static void Name(ReadOnlySpan<byte> data)
@@ -139,7 +139,7 @@ static class FuzzTargets
         {
             // Exercise TryParse: treat payload as wire-format message buffer
             int offset = payload[0] % payload.Length;
-            if (DnsName.TryParse(payload, offset, out DnsName name, out int bytesConsumed))
+            if (DnsEncodedName.TryParse(payload, offset, out DnsEncodedName name, out int bytesConsumed))
             {
                 name.ToString();
                 name.GetFormattedLength();
@@ -160,8 +160,8 @@ static class FuzzTargets
                 chars[i] = (char)payload[i];
             }
 
-            Span<byte> dest = stackalloc byte[DnsName.MaxEncodedLength];
-            OperationStatus status = DnsName.TryCreate(chars, dest, out DnsName name, out int written);
+            Span<byte> dest = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+            OperationStatus status = DnsEncodedName.TryEncode(chars, dest, out DnsEncodedName name, out int written);
 
             if (status == OperationStatus.Done && written > 0)
             {
@@ -214,8 +214,8 @@ static class FuzzTargets
             nameChars[i] = (char)nameBytes[i];
         }
 
-        Span<byte> nameBuf = new byte[DnsName.MaxEncodedLength];
-        OperationStatus status = DnsName.TryCreate(nameChars, nameBuf, out DnsName dnsName, out _);
+        Span<byte> nameBuf = new byte[DnsEncodedName.MaxEncodedLength];
+        OperationStatus status = DnsEncodedName.TryEncode(nameChars, nameBuf, out DnsEncodedName encodedName, out _);
         if (status != OperationStatus.Done)
         {
             return;
@@ -227,14 +227,14 @@ static class FuzzTargets
             Span<byte> writeDest = new byte[size];
             DnsMessageWriter writer = new DnsMessageWriter(writeDest);
             writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(0x1234));
-            writer.TryWriteQuestion(dnsName, (DnsRecordType)type);
+            writer.TryWriteQuestion(encodedName, (DnsRecordType)type);
         }
 
         // Full-size write and read back
         Span<byte> fullDest = new byte[512];
         DnsMessageWriter fullWriter = new DnsMessageWriter(fullDest);
         if (fullWriter.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(0x5678)) &&
-            fullWriter.TryWriteQuestion(dnsName, (DnsRecordType)type))
+            fullWriter.TryWriteQuestion(encodedName, (DnsRecordType)type))
         {
             try
             {
@@ -268,8 +268,8 @@ static class FuzzTargets
             nameChars[i] = (char)nameBytes[i];
         }
 
-        Span<byte> nameBuf = stackalloc byte[DnsName.MaxEncodedLength];
-        OperationStatus status = DnsName.TryCreate(nameChars, nameBuf, out DnsName dnsName, out _);
+        Span<byte> nameBuf = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        OperationStatus status = DnsEncodedName.TryEncode(nameChars, nameBuf, out DnsEncodedName encodedName, out _);
         if (status != OperationStatus.Done)
         {
             return;
@@ -282,7 +282,7 @@ static class FuzzTargets
         {
             return;
         }
-        if (!writer.TryWriteQuestion(dnsName, DnsRecordType.A))
+        if (!writer.TryWriteQuestion(encodedName, DnsRecordType.A))
         {
             return;
         }
@@ -299,7 +299,7 @@ static class FuzzTargets
         if (reader.TryReadQuestion(out DnsQuestion question))
         {
             // Compare via ToString() to normalize (TryCreate strips trailing dots)
-            string writtenName = dnsName.ToString();
+            string writtenName = encodedName.ToString();
             string readName = question.Name.ToString();
             if (!writtenName.Equals(readName, StringComparison.OrdinalIgnoreCase))
             {
@@ -408,8 +408,8 @@ static class SeedGenerator
 
     private static byte[] EncodeName(string name)
     {
-        Span<byte> buf = stackalloc byte[DnsName.MaxEncodedLength];
-        DnsName.TryCreate(name, buf, out _, out int written);
+        Span<byte> buf = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode(name, buf, out _, out int written);
         return buf[..written].ToArray();
     }
 

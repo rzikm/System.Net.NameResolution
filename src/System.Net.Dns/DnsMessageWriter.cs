@@ -35,7 +35,7 @@ public ref struct DnsMessageWriter
     /// Expands compression pointers if present (safe for names from responses).
     /// </summary>
     public bool TryWriteQuestion(
-        DnsName name,
+        DnsEncodedName name,
         DnsRecordType type,
         DnsRecordClass @class = DnsRecordClass.Internet)
     {

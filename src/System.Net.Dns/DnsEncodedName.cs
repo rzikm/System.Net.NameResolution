@@ -6,7 +6,7 @@ namespace System.Net;
 /// Represents a domain name in DNS wire format (RFC 1035 §4.1.4).
 /// Works for both read path (response with compression pointers) and write path (flat encoded).
 /// </summary>
-public readonly ref struct DnsName
+public readonly ref struct DnsEncodedName
 {
     /// <summary>
     /// Maximum wire-format size of any valid domain name
@@ -22,7 +22,7 @@ public readonly ref struct DnsName
     // Offset within _buffer where this name starts.
     private readonly int _offset;
 
-    internal DnsName(ReadOnlySpan<byte> buffer, int offset)
+    internal DnsEncodedName(ReadOnlySpan<byte> buffer, int offset)
     {
         _buffer = buffer;
         _offset = offset;
@@ -31,7 +31,7 @@ public readonly ref struct DnsName
     /// <summary>
     /// Attempts to parse a DNS name from a wire-format buffer at the given offset.
     /// Validates that the name is well-formed (valid label lengths, no truncation).
-    /// The <paramref name="buffer"/> is retained by the returned <see cref="DnsName"/>
+    /// The <paramref name="buffer"/> is retained by the returned <see cref="DnsEncodedName"/>
     /// to support compression pointer resolution.
     /// </summary>
     /// <param name="buffer">The buffer containing the encoded name.</param>
@@ -40,7 +40,7 @@ public readonly ref struct DnsName
     /// <param name="bytesConsumed">On success, receives the number of bytes consumed from the buffer
     /// at <paramref name="offset"/> (not following compression pointers).</param>
     /// <returns><c>true</c> if the name was successfully parsed; <c>false</c> if the data is malformed.</returns>
-    public static bool TryParse(ReadOnlySpan<byte> buffer, int offset, out DnsName name, out int bytesConsumed)
+    public static bool TryParse(ReadOnlySpan<byte> buffer, int offset, out DnsEncodedName name, out int bytesConsumed)
     {
         name = default;
         bytesConsumed = 0;
@@ -50,7 +50,7 @@ public readonly ref struct DnsName
             return false;
         }
 
-        DnsName candidate = new DnsName(buffer, offset);
+        DnsEncodedName candidate = new DnsEncodedName(buffer, offset);
         int wireLen = candidate.GetWireLength();
         if (wireLen < 0)
         {
@@ -75,10 +75,10 @@ public readonly ref struct DnsName
     /// <summary>
     /// Validates a domain name and encodes it into wire format.
     /// </summary>
-    public static OperationStatus TryCreate(
+    public static OperationStatus TryEncode(
         ReadOnlySpan<char> name,
         Span<byte> destination,
-        out DnsName result,
+        out DnsEncodedName result,
         out int bytesWritten)
     {
         result = default;
@@ -93,7 +93,7 @@ public readonly ref struct DnsName
             }
             destination[0] = 0; // root label
             bytesWritten = 1;
-            result = new DnsName(destination[..1], 0);
+            result = new DnsEncodedName(destination[..1], 0);
             return OperationStatus.Done;
         }
 
@@ -166,7 +166,7 @@ public readonly ref struct DnsName
         pos++;
 
         bytesWritten = pos;
-        result = new DnsName(destination[..pos], 0);
+        result = new DnsEncodedName(destination[..pos], 0);
         return OperationStatus.Done;
     }
 
@@ -225,7 +225,7 @@ public readonly ref struct DnsName
     /// <summary>
     /// Decodes the domain name into the destination buffer as a dotted string.
     /// </summary>
-    public bool TryFormat(Span<char> destination, out int charsWritten)
+    public bool TryDecode(Span<char> destination, out int charsWritten)
     {
         charsWritten = 0;
         DnsLabelEnumerator enumerator = EnumerateLabels();
@@ -297,7 +297,7 @@ public readonly ref struct DnsName
             return ".";
         }
         Span<char> chars = len <= 256 ? stackalloc char[len] : new char[len];
-        TryFormat(chars, out _);
+        TryDecode(chars, out _);
         return new string(chars);
     }
 

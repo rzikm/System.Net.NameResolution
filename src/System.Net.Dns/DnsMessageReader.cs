@@ -7,11 +7,11 @@ namespace System.Net;
 /// </summary>
 public readonly ref struct DnsQuestion
 {
-    public DnsName Name { get; }
+    public DnsEncodedName Name { get; }
     public DnsRecordType Type { get; }
     public DnsRecordClass Class { get; }
 
-    internal DnsQuestion(DnsName name, DnsRecordType type, DnsRecordClass @class)
+    internal DnsQuestion(DnsEncodedName name, DnsRecordType type, DnsRecordClass @class)
     {
         Name = name;
         Type = type;
@@ -24,7 +24,7 @@ public readonly ref struct DnsQuestion
 /// </summary>
 public readonly ref struct DnsRecord
 {
-    public DnsName Name { get; }
+    public DnsEncodedName Name { get; }
     public DnsRecordType Type { get; }
     public DnsRecordClass Class { get; }
     public uint TimeToLive { get; }
@@ -38,7 +38,7 @@ public readonly ref struct DnsRecord
     /// <summary>Offset of Data within Message.</summary>
     public int DataOffset { get; }
 
-    internal DnsRecord(DnsName name, DnsRecordType type, DnsRecordClass @class,
+    internal DnsRecord(DnsEncodedName name, DnsRecordType type, DnsRecordClass @class,
         uint ttl, ReadOnlySpan<byte> data, ReadOnlySpan<byte> message, int dataOffset)
     {
         Name = name;
@@ -90,7 +90,7 @@ public ref struct DnsMessageReader
         }
 
         // Read name
-        if (!DnsName.TryParse(_message, _pos, out DnsName name, out int nameWireLen))
+        if (!DnsEncodedName.TryParse(_message, _pos, out DnsEncodedName name, out int nameWireLen))
         {
             return false; // malformed name
         }
@@ -124,7 +124,7 @@ public ref struct DnsMessageReader
         }
 
         // Read name
-        if (!DnsName.TryParse(_message, _pos, out DnsName name, out int nameWireLen))
+        if (!DnsEncodedName.TryParse(_message, _pos, out DnsEncodedName name, out int nameWireLen))
         {
             return false; // malformed name
         }

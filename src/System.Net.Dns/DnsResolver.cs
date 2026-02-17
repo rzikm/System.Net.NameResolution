@@ -219,8 +219,8 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         byte[] responseBuffer, CancellationToken ct)
     {
         // Build query message on the stack
-        Span<byte> nameBuf = stackalloc byte[DnsName.MaxEncodedLength];
-        OperationStatus status = DnsName.TryCreate(name, nameBuf, out DnsName dnsName, out _);
+        Span<byte> nameBuf = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        OperationStatus status = DnsEncodedName.TryEncode(name, nameBuf, out DnsEncodedName encodedName, out _);
         if (status != OperationStatus.Done)
         {
             throw new ArgumentException($"Invalid DNS name: '{name}'", nameof(name));
@@ -230,7 +230,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         DnsMessageWriter writer = new DnsMessageWriter(querySpan);
         ushort queryId = (ushort)Random.Shared.Next(0, ushort.MaxValue + 1);
         writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(queryId));
-        writer.TryWriteQuestion(dnsName, type);
+        writer.TryWriteQuestion(encodedName, type);
 
         // Copy to a heap buffer for async send (can't use stackalloc across await)
         byte[] queryBytes = ArrayPool<byte>.Shared.Rent(writer.BytesWritten);

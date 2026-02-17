@@ -31,9 +31,9 @@ public class DnsMessageWriterTests
         var header = DnsMessageHeader.CreateStandardQuery(id: 0x1234);
         Assert.True(writer.TryWriteHeader(in header));
 
-        Span<byte> nameBuffer = stackalloc byte[DnsName.MaxEncodedLength];
+        Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
         Assert.Equal(OperationStatus.Done,
-            DnsName.TryCreate("example.com", nameBuffer, out var name, out _));
+            DnsEncodedName.TryEncode("example.com", nameBuffer, out var name, out _));
         Assert.True(writer.TryWriteQuestion(name, DnsRecordType.A));
 
         Assert.Equal(expected.Length, writer.BytesWritten);
@@ -49,12 +49,12 @@ public class DnsMessageWriterTests
         var header = DnsMessageHeader.CreateStandardQuery(id: 1, questionCount: 2);
         Assert.True(writer.TryWriteHeader(in header));
 
-        Span<byte> nameBuffer = stackalloc byte[DnsName.MaxEncodedLength];
+        Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
 
-        DnsName.TryCreate("a.com", nameBuffer, out var name1, out _);
+        DnsEncodedName.TryEncode("a.com", nameBuffer, out var name1, out _);
         Assert.True(writer.TryWriteQuestion(name1, DnsRecordType.A));
 
-        DnsName.TryCreate("b.com", nameBuffer, out var name2, out _);
+        DnsEncodedName.TryEncode("b.com", nameBuffer, out var name2, out _);
         Assert.True(writer.TryWriteQuestion(name2, DnsRecordType.AAAA));
 
         // Header(12) + Q1(1+1+3+1+3+1+4) + Q2 (same) = 12 + 11 + 11 = 34
@@ -75,14 +75,14 @@ public class DnsMessageWriterTests
     [Fact]
     public void WriteQuestion_WithCompressedName_ExpandsPointers()
     {
-        // Simulate a DnsName parsed from a response with a compression pointer
+        // Simulate a DnsEncodedName parsed from a response with a compression pointer
         byte[] message =
         [
             7, (byte)'e', (byte)'x', (byte)'a', (byte)'m', (byte)'p', (byte)'l', (byte)'e',
             3, (byte)'c', (byte)'o', (byte)'m', 0,
             3, (byte)'w', (byte)'w', (byte)'w', 0xC0, 0x00 // www + pointer to example.com
         ];
-        var compressedName = new DnsName(message, 13);
+        var compressedName = new DnsEncodedName(message, 13);
 
         Span<byte> buffer = stackalloc byte[512];
         var writer = new DnsMessageWriter(buffer);
@@ -110,8 +110,8 @@ public class DnsMessageWriterTests
         var header = DnsMessageHeader.CreateStandardQuery(id: 1);
         Assert.True(writer.TryWriteHeader(in header));
 
-        Span<byte> nameBuffer = stackalloc byte[DnsName.MaxEncodedLength];
-        DnsName.TryCreate("example.com", nameBuffer, out var name, out _);
+        Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode("example.com", nameBuffer, out var name, out _);
         Assert.False(writer.TryWriteQuestion(name, DnsRecordType.A));
         Assert.Equal(12, writer.BytesWritten); // only header was written
     }

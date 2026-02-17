@@ -121,10 +121,10 @@ The low-level API provides non-allocating, type-safe primitives for constructing
 
 ### Design Principles
 
-- **`ref struct`-based**: Reader, writer, and related types like `DnsName` are `ref struct`s because they hold `Span<T>` references. This ensures stack-only usage and prevents accidental heap allocation.
+- **`ref struct`-based**: Reader, writer, and related types like `DnsEncodedName` are `ref struct`s because they hold `Span<T>` references. This ensures stack-only usage and prevents accidental heap allocation.
 - **`Try*` pattern**: All operations return `bool` to indicate success/failure (buffer too small, malformed data), rather than throwing exceptions. This is consistent with low-level .NET APIs.
 - **Sequential cursor**: Both reader and writer maintain an internal position that advances with each operation. DNS messages are inherently sequential (header → questions → answers → authority → additional).
-- **Lazy domain name resolution**: `DnsName` holds a reference to the full message buffer and resolves compression pointers on demand, avoiding intermediate copies.
+- **Lazy domain name resolution**: `DnsEncodedName` holds a reference to the full message buffer and resolves compression pointers on demand, avoiding intermediate copies.
 
 ### Enums
 
@@ -223,7 +223,7 @@ public readonly struct DnsMessageHeader
 }
 ```
 
-### DnsName
+### DnsEncodedName
 
 Represents a domain name in DNS wire format. Used by both the read path (names parsed from response messages) and the write path (names created from strings for query messages).
 
@@ -234,7 +234,7 @@ Comparison is case-insensitive per DNS specification.
 ```csharp
 namespace System.Net;
 
-public readonly ref struct DnsName
+public readonly ref struct DnsEncodedName
 {
     // Maximum wire-format size of any valid domain name
     // (including length prefixes and root label terminator).
@@ -248,22 +248,22 @@ public readonly ref struct DnsName
     //   Done          - success
     //   InvalidData   - name violates DNS rules
     //   DestinationTooSmall - destination buffer too small
-    public static OperationStatus TryCreate(
+    public static OperationStatus TryEncode(
         ReadOnlySpan<char> name,
         Span<byte> destination,
-        out DnsName result,
+        out DnsEncodedName result,
         out int bytesWritten);
 
     // --- Read path: parse from a wire-format buffer ---
 
     // Parses a DNS name from a wire-format buffer at the given offset.
     // Validates that the name is well-formed (valid label lengths, no truncation).
-    // The buffer is retained by the returned DnsName to support compression pointer resolution.
+    // The buffer is retained by the returned DnsEncodedName to support compression pointer resolution.
     // bytesConsumed is the number of bytes consumed at offset (not following compression pointers).
     public static bool TryParse(
         ReadOnlySpan<byte> buffer,
         int offset,
-        out DnsName name,
+        out DnsEncodedName name,
         out int bytesConsumed);
 
     // --- Shared: works identically for parsed and created names ---
@@ -273,7 +273,7 @@ public readonly ref struct DnsName
     public bool Equals(ReadOnlySpan<char> name);
 
     // Decodes the domain name into the destination buffer as a dotted string.
-    public bool TryFormat(Span<char> destination, out int charsWritten);
+    public bool TryDecode(Span<char> destination, out int charsWritten);
 
     // Returns the character count of the decoded dotted string representation.
     public int GetFormattedLength();
@@ -320,7 +320,7 @@ public ref struct DnsMessageWriter
     // Writes a question entry: pre-validated encoded domain name + type + class.
     // Returns false only if the destination buffer is too small.
     public bool TryWriteQuestion(
-        DnsName name,
+        DnsEncodedName name,
         DnsRecordType type,
         DnsRecordClass @class = DnsRecordClass.Internet);
 }
@@ -363,7 +363,7 @@ namespace System.Net;
 
 public readonly ref struct DnsQuestion
 {
-    public DnsName Name { get; }
+    public DnsEncodedName Name { get; }
     public DnsRecordType Type { get; }
     public DnsRecordClass Class { get; }
 }
@@ -378,7 +378,7 @@ namespace System.Net;
 
 public readonly ref struct DnsRecord
 {
-    public DnsName Name { get; }
+    public DnsEncodedName Name { get; }
     public DnsRecordType Type { get; }
     public DnsRecordClass Class { get; }
     public uint TimeToLive { get; }
@@ -401,7 +401,7 @@ public readonly ref struct DnsRecord
 > ```csharp
 > // Reads a domain name at the given byte offset within this record's RDATA.
 > // Handles compression pointers using the underlying message context.
-> public bool TryReadName(int rdataOffset, out DnsName name, out int bytesConsumed);
+> public bool TryReadName(int rdataOffset, out DnsEncodedName name, out int bytesConsumed);
 > ```
 >
 > This would be more encapsulated — users wouldn't need to understand message-level offsets and compression — but less flexible for arbitrary custom parsing. We chose to expose the raw context since the target audience (low-level DNS users) already understands the wire format.
@@ -429,13 +429,13 @@ public readonly ref struct DnsAAAARecordData
 
 public readonly ref struct DnsCNameRecordData
 {
-    public DnsName CName { get; }
+    public DnsEncodedName CName { get; }
 }
 
 public readonly ref struct DnsMxRecordData
 {
     public ushort Preference { get; }
-    public DnsName Exchange { get; }
+    public DnsEncodedName Exchange { get; }
 }
 
 public readonly ref struct DnsSrvRecordData
@@ -443,13 +443,13 @@ public readonly ref struct DnsSrvRecordData
     public ushort Priority { get; }
     public ushort Weight { get; }
     public ushort Port { get; }
-    public DnsName Target { get; }
+    public DnsEncodedName Target { get; }
 }
 
 public readonly ref struct DnsSoaRecordData
 {
-    public DnsName PrimaryNameServer { get; }
-    public DnsName ResponsibleMailbox { get; }
+    public DnsEncodedName PrimaryNameServer { get; }
+    public DnsEncodedName ResponsibleMailbox { get; }
     public uint SerialNumber { get; }
     public uint RefreshInterval { get; }
     public uint RetryInterval { get; }
@@ -473,12 +473,12 @@ public ref struct DnsTxtEnumerator
 
 public readonly ref struct DnsPtrRecordData
 {
-    public DnsName Name { get; }
+    public DnsEncodedName Name { get; }
 }
 
 public readonly ref struct DnsNsRecordData
 {
-    public DnsName Name { get; }
+    public DnsEncodedName Name { get; }
 }
 
 // --- Extension methods for parsing typed records ---
@@ -509,8 +509,8 @@ public static class DnsRecordExtensions
 
 ```csharp
 // Phase 1: Validate and encode the domain name
-Span<byte> nameBuffer = stackalloc byte[DnsName.MaxEncodedLength];
-var status = DnsName.TryCreate("example.com", nameBuffer, out var name, out _);
+Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+var status = DnsEncodedName.TryEncode("example.com", nameBuffer, out var name, out _);
 if (status != OperationStatus.Done) { /* handle invalid name */ }
 
 // Phase 2: Write the message
