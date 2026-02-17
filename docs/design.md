@@ -190,7 +190,33 @@ public enum DnsHeaderFlags : ushort
 
 ### DnsMessageHeader
 
-A mutable struct representing the fixed 12-byte DNS message header. Used by both reader and writer. Properties default to zero/false, so callers only need to set the fields relevant to their use case.
+A mutable struct representing the fixed 12-byte DNS message header (RFC 1035 §4.1.1). Used by both reader and writer. Properties default to zero/false, so callers only need to set the fields relevant to their use case.
+
+Wire format (each row is 16 bits):
+
+```
+                                 1  1  1  1  1  1
+   0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5
+ +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+ |                      ID                         |
+ +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+ |QR|   OpCode  |AA|TC|RD|RA| Z|AD|CD|   RCODE    |
+ +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+ |                    QDCOUNT                      |
+ +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+ |                    ANCOUNT                      |
+ +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+ |                    NSCOUNT                      |
+ +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+ |                    ARCOUNT                      |
+ +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+```
+
+This layout drives the enum sizing decisions:
+
+- **`DnsOpCode : byte`** — 4-bit field (bits 1–4), fits in a byte.
+- **`DnsResponseCode : ushort`** — 4-bit field (bits 12–15) in the base header, but EDNS0 extends it to 12 bits via the OPT record, so `ushort` provides room for future extension.
+- **`DnsHeaderFlags : ushort`** — 6 individual flag bits (AA, TC, RD, RA, AD, CD) packed into a `[Flags]` enum. Uses logical bit positions 0–5 (not wire positions); the encode/decode methods map between them.
 
 ```csharp
 namespace System.Net;
