@@ -1,4 +1,3 @@
-using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -13,39 +12,6 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         _server = LoopbackDnsServer.Start();
-
-        // CNAME + A record in same response
-        _server.AddCNameAndARecord("alias.test", "real.test", IPAddress.Parse("10.0.0.99"));
-
-        // Server failure
-        _server.AddServerFailure("fail.test", DnsRecordType.A);
-
-        // Drop (no response → timeout)
-        _server.AddDrop("timeout.test", DnsRecordType.A);
-
-        // Malformed: response too short (only 4 bytes)
-        _server.AddRawResponse("truncated.test", DnsRecordType.A, id => [(byte)(id >> 8), (byte)id, 0x81, 0x80]);
-
-        // Malformed: response with QR=0 (looks like a query, not a response)
-        _server.AddRawResponse("notresponse.test", DnsRecordType.A, id =>
-        {
-            // Valid 12-byte header but QR=0
-            byte[] buf = new byte[12];
-            buf[0] = (byte)(id >> 8);
-            buf[1] = (byte)id;
-            // flags = 0x0100 (RD=1, QR=0)
-            buf[2] = 0x01;
-            buf[3] = 0x00;
-            return buf;
-        });
-
-        // Malformed: response with a different question name
-        _server.AddRawResponse("wrongquestion.test", DnsRecordType.A, id =>
-        {
-            // Build a valid response but with question name "other.test" instead of "wrongquestion.test"
-            return LoopbackDnsServer.BuildSimpleResponse(id,
-                LoopbackDnsServer.EncodeName("other.test"), DnsRecordType.A, [10, 0, 0, 1], 60);
-        });
 
         _resolver = new DnsResolver(new DnsResolverOptions
         {
@@ -89,7 +55,9 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         {
             udpReceived.Release();
             serverCanContinue.Wait(TimeSpan.FromSeconds(10));
-            return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+            return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                .Answer([10, 0, 0, 1], ttl: 60)
+                .Build();
         });
 
         using DnsResolver resolver = new DnsResolver(new DnsResolverOptions
@@ -127,9 +95,13 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
                 tcpReceived.Release();
                 // Block until test signals (after cancelling the resolver)
                 serverCanContinue.Wait(TimeSpan.FromSeconds(10));
-                return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+                return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                    .Answer([10, 0, 0, 1], ttl: 60)
+                    .Build();
             }
-            return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A);
+            return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                .Truncated()
+                .Build();
         });
 
         using DnsResolver resolver = new DnsResolver(new DnsResolverOptions
@@ -169,9 +141,13 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
                 tcpReceived.Release();
                 // Block until test finishes — simulates an unresponsive TCP server
                 serverCanContinue.Wait(TimeSpan.FromSeconds(10));
-                return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+                return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                    .Answer([10, 0, 0, 1], ttl: 60)
+                    .Build();
             }
-            return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A);
+            return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                .Truncated()
+                .Build();
         });
 
         using DnsResolver resolver = new DnsResolver(new DnsResolverOptions
@@ -193,8 +169,13 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     [Fact]
     public async Task ResolveAddresses_CNameAndARecord_ReturnsAddress()
     {
-        // The server returns CNAME + A in the same response.
-        // Our CollectAddresses picks up the A record from the answer section.
+        byte[] cnameEncoded = LoopbackDnsServer.EncodeName("real.test");
+        _server.AddResponse("alias.test", DnsRecordType.A, (queryId, qName, _) =>
+            DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                .Answer(DnsRecordType.CNAME, cnameEncoded, ttl: 300)
+                .Answer("real.test", DnsRecordType.A, [10, 0, 0, 99], ttl: 300)
+                .Build());
+
         DnsResult<DnsResolvedAddress> result = await _resolver.ResolveAddressesAsync("alias.test", AddressFamily.InterNetwork);
 
         Assert.Equal(DnsResponseCode.NoError, result.ResponseCode);
@@ -207,6 +188,8 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     [Fact]
     public async Task Timeout_ThrowsTimeoutException()
     {
+        _server.AddResponse("timeout.test", DnsRecordType.A, (_, _, _) => []);
+
         // Server drops the packet, timeout fires → TimeoutException
         await Assert.ThrowsAsync<TimeoutException>(
             () => _resolver.ResolveAddressesAsync("timeout.test", AddressFamily.InterNetwork));
@@ -215,6 +198,8 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     [Fact]
     public async Task ServerFailure_ThrowsInvalidOperation()
     {
+        _server.AddResponse("fail.test", DnsRecordType.A, b => b.ResponseCode(DnsResponseCode.ServerFailure));
+
         // ServerFailure response code → treated as error
         // With MaxRetries=0, single attempt fails → all servers failed
         await Assert.ThrowsAsync<InvalidOperationException>(
@@ -226,6 +211,8 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     [Fact]
     public async Task TruncatedResponse_ThrowsWithInvalidDataInner()
     {
+        _server.AddRawResponse("truncated.test", DnsRecordType.A, id => [(byte)(id >> 8), (byte)id, 0x81, 0x80]);
+
         // Response is only 4 bytes — too short for a DNS header
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _resolver.ResolveAddressesAsync("truncated.test", AddressFamily.InterNetwork));
@@ -235,6 +222,18 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     [Fact]
     public async Task NonResponseMessage_ThrowsWithInvalidDataInner()
     {
+        _server.AddRawResponse("notresponse.test", DnsRecordType.A, id =>
+        {
+            // Valid 12-byte header but QR=0
+            byte[] buf = new byte[12];
+            buf[0] = (byte)(id >> 8);
+            buf[1] = (byte)id;
+            // flags = 0x0100 (RD=1, QR=0)
+            buf[2] = 0x01;
+            buf[3] = 0x00;
+            return buf;
+        });
+
         // Response has QR=0 — not a valid DNS response
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _resolver.ResolveAddressesAsync("notresponse.test", AddressFamily.InterNetwork));
@@ -244,6 +243,11 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     [Fact]
     public async Task WrongQuestionName_ThrowsWithInvalidDataInner()
     {
+        _server.AddRawResponse("wrongquestion.test", DnsRecordType.A, id =>
+            DnsResponseBuilder.For(id, LoopbackDnsServer.EncodeName("other.test"), DnsRecordType.A)
+                .Answer([10, 0, 0, 1], ttl: 60)
+                .Build());
+
         // Response echoes back a different question name than what was queried
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _resolver.ResolveAddressesAsync("wrongquestion.test", AddressFamily.InterNetwork));
@@ -257,7 +261,9 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     {
         // Header says ANCOUNT=2 but no answer records are present after the question
         _server.AddResponse("malformed-answers.test", DnsRecordType.A, (queryId, qName, _) =>
-            LoopbackDnsServer.BuildResponseWithMissingAnswers(queryId, qName, DnsRecordType.A, 2));
+            DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                .OverrideAnswerCount(2)
+                .Build());
 
         await Assert.ThrowsAsync<InvalidDataException>(
             () => _resolver.ResolveAddressesAsync("malformed-answers.test", AddressFamily.InterNetwork));
@@ -270,7 +276,10 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         // This fails during response validation (question doesn't match), so we get
         // InvalidOperationException wrapping InvalidDataException.
         _server.AddRawResponse("malformed-questions.test", DnsRecordType.A, id =>
-            LoopbackDnsServer.BuildResponseWithMissingQuestions(id, 2));
+            DnsResponseBuilder.For(id, [], DnsRecordType.A)
+                .OverrideQuestionCount(2)
+                .SkipQuestion()
+                .Build());
 
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _resolver.ResolveAddressesAsync("malformed-questions.test", AddressFamily.InterNetwork));
@@ -282,7 +291,9 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
     {
         // Header says ANCOUNT=1 but no answer record data present after question
         _server.AddResponse("malformed-srv.test", DnsRecordType.SRV, (queryId, qName, _) =>
-            LoopbackDnsServer.BuildResponseWithMissingAnswers(queryId, qName, DnsRecordType.SRV, 1));
+            DnsResponseBuilder.For(queryId, qName, DnsRecordType.SRV)
+                .OverrideAnswerCount(1)
+                .Build());
 
         await Assert.ThrowsAsync<InvalidDataException>(
             () => _resolver.ResolveServiceAsync("malformed-srv.test"));
@@ -294,9 +305,10 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         // Valid answer, but NSCOUNT claims authority records that aren't there.
         // ResolveServiceAsync reads the authority section, so this tests that path.
         _server.AddResponse("malformed-auth.test", DnsRecordType.SRV, (queryId, qName, _) =>
-            LoopbackDnsServer.BuildResponseWithMissingAuthority(queryId, qName, DnsRecordType.SRV,
-                new byte[] { 0, 0, 0, 0, 0x00, 0x50, 3, (byte)'s', (byte)'v', (byte)'c', 4, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0 },
-                300, 1));
+            DnsResponseBuilder.For(queryId, qName, DnsRecordType.SRV)
+                .Answer(new byte[] { 0, 0, 0, 0, 0x00, 0x50, 3, (byte)'s', (byte)'v', (byte)'c', 4, (byte)'t', (byte)'e', (byte)'s', (byte)'t', 0 }, ttl: 300)
+                .OverrideAuthorityCount(1)
+                .Build());
 
         await Assert.ThrowsAsync<InvalidDataException>(
             () => _resolver.ResolveServiceAsync("malformed-auth.test"));
@@ -321,23 +333,9 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         // Build a response with ARCOUNT > 0 but no additional records.
         // ResolveServiceAsync reads the additional section.
         _server.AddResponse("malformed-additional.test", DnsRecordType.SRV, (queryId, qName, _) =>
-        {
-            using MemoryStream ms = new();
-            // Header: valid, with ARCOUNT=1 but no additional records
-            ms.Write([(byte)(queryId >> 8), (byte)queryId]);
-            ms.Write([0x81, 0x80]); // QR=1, RD=1, RA=1
-            ms.Write([0x00, 0x01]); // QDCOUNT=1
-            ms.Write([0x00, 0x00]); // ANCOUNT=0
-            ms.Write([0x00, 0x00]); // NSCOUNT=0
-            ms.Write([0x00, 0x01]); // ARCOUNT=1 — but no additional records follow
-
-            // Question echo
-            ms.Write(qName);
-            ms.Write([0x00, 0x21]); // QTYPE=SRV
-            ms.Write([0x00, 0x01]); // QCLASS=IN
-
-            return ms.ToArray();
-        });
+            DnsResponseBuilder.For(queryId, qName, DnsRecordType.SRV)
+                .OverrideAdditionalCount(1)
+                .Build());
 
         await Assert.ThrowsAsync<InvalidDataException>(
             () => _resolver.ResolveServiceAsync("malformed-additional.test"));
@@ -370,8 +368,14 @@ public class DnsResolverRetryTests : IAsyncLifetime
         {
             callCount++;
             if (callCount < 3)
-                return LoopbackDnsServer.BuildErrorResponse(queryId, qName, DnsRecordType.A, DnsResponseCode.ServerFailure);
-            return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+            {
+                return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                    .ResponseCode(DnsResponseCode.ServerFailure)
+                    .Build();
+            }
+            return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                .Answer([10, 0, 0, 1], ttl: 60)
+                .Build();
         });
 
         await using DnsResolver resolver = new(new DnsResolverOptions
@@ -390,7 +394,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
     [Fact]
     public async Task NameError_NoRetry()
     {
-        _primary.AddNxDomain("nxdomain.test", DnsRecordType.A);
+        _primary.AddResponse("nxdomain.test", DnsRecordType.A, b => b.ResponseCode(DnsResponseCode.NameError));
 
         await using DnsResolver resolver = new(new DnsResolverOptions
         {
@@ -409,8 +413,8 @@ public class DnsResolverRetryTests : IAsyncLifetime
     [Fact]
     public async Task Failover_PrimaryDrops_SecondarySucceeds()
     {
-        _primary.AddDrop("failover.test", DnsRecordType.A);
-        _secondary.AddARecord("failover.test", IPAddress.Parse("10.0.0.2"));
+        _primary.AddResponse("failover.test", DnsRecordType.A, (_, _, _) => []);
+        _secondary.AddResponse("failover.test", DnsRecordType.A, b => b.Answer([10, 0, 0, 2]));
 
         await using DnsResolver resolver = new(new DnsResolverOptions
         {
@@ -427,8 +431,8 @@ public class DnsResolverRetryTests : IAsyncLifetime
     [Fact]
     public async Task Failover_PrimaryServerFailure_SecondarySucceeds()
     {
-        _primary.AddServerFailure("failover2.test", DnsRecordType.A);
-        _secondary.AddARecord("failover2.test", IPAddress.Parse("10.0.0.3"));
+        _primary.AddResponse("failover2.test", DnsRecordType.A, b => b.ResponseCode(DnsResponseCode.ServerFailure));
+        _secondary.AddResponse("failover2.test", DnsRecordType.A, b => b.Answer([10, 0, 0, 3]));
 
         await using DnsResolver resolver = new(new DnsResolverOptions
         {
@@ -454,7 +458,9 @@ public class DnsResolverRetryTests : IAsyncLifetime
                 // Return a truncated response (too short for header)
                 return [(byte)(queryId >> 8), (byte)queryId, 0x81, 0x80];
             }
-            return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 5], 60);
+            return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                .Answer([10, 0, 0, 5], ttl: 60)
+                .Build();
         });
 
         await using DnsResolver resolver = new(new DnsResolverOptions
@@ -474,7 +480,10 @@ public class DnsResolverRetryTests : IAsyncLifetime
     public async Task TcpFallback_WhenTruncated_ResolvesOverTcp()
     {
         await using LoopbackDnsServer server = LoopbackDnsServer.Start();
-        server.AddTruncatedARecord("tcpfallback.test", IPAddress.Parse("10.0.0.42"));
+        server.AddResponse("tcpfallback.test", DnsRecordType.A, (queryId, qName, isTcp) =>
+            isTcp
+                ? DnsResponseBuilder.For(queryId, qName, DnsRecordType.A).Answer([10, 0, 0, 42]).Build()
+                : DnsResponseBuilder.For(queryId, qName, DnsRecordType.A).Truncated().Build());
 
         using DnsResolver resolver = new DnsResolver(new DnsResolverOptions
         {
@@ -498,10 +507,11 @@ public class DnsResolverRetryTests : IAsyncLifetime
         _primary.AddResponse("tcpdrop.test", DnsRecordType.A, (queryId, qName, isTcp) =>
             isTcp
                 ? [] // drop TCP connection
-                : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A));
+                : DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                    .Truncated()
+                    .Build());
 
-        // Secondary returns a normal response
-        _secondary.AddARecord("tcpdrop.test", IPAddress.Parse("10.0.0.2"));
+        _secondary.AddResponse("tcpdrop.test", DnsRecordType.A, b => b.Answer([10, 0, 0, 2]));
 
         await using DnsResolver resolver = new(new DnsResolverOptions
         {
@@ -529,9 +539,13 @@ public class DnsResolverRetryTests : IAsyncLifetime
             udpCount++;
             if (udpCount == 1)
             {
-                return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A);
+                return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                    .Truncated()
+                    .Build();
             }
-            return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+            return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                .Answer([10, 0, 0, 1], ttl: 60)
+                .Build();
         });
 
         await using DnsResolver resolver = new(new DnsResolverOptions
@@ -557,36 +571,19 @@ public class DnsResolverRetryTests : IAsyncLifetime
         {
             if (!isTcp)
             {
-                return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A);
+                return DnsResponseBuilder.For(queryId, qName, DnsRecordType.A)
+                    .Truncated()
+                    .Build();
             }
 
             // Build a large response with many A records
-            using MemoryStream ms = new();
-            // Header
-            ms.Write([(byte)(queryId >> 8), (byte)queryId]);
-            ms.Write([0x81, 0x80]); // QR=1, RD=1, RA=1
-            ms.Write([0x00, 0x01]); // QDCOUNT=1
-            ms.Write([(byte)(recordCount >> 8), (byte)recordCount]); // ANCOUNT
-            ms.Write([0x00, 0x00]); // NSCOUNT
-            ms.Write([0x00, 0x00]); // ARCOUNT
-
-            // Question echo
-            ms.Write(qName);
-            ms.Write([0x00, 0x01]); // QTYPE=A
-            ms.Write([0x00, 0x01]); // QCLASS=IN
-
-            // Answer records
+            DnsResponseBuilder builder = DnsResponseBuilder.For(queryId, qName, DnsRecordType.A);
             for (int i = 0; i < recordCount; i++)
             {
-                ms.Write([0xC0, 0x0C]); // pointer to question name
-                ms.Write([0x00, 0x01]); // TYPE=A
-                ms.Write([0x00, 0x01]); // CLASS=IN
-                ms.Write([0x00, 0x00, 0x01, 0x2C]); // TTL=300
-                ms.Write([0x00, 0x04]); // RDLENGTH=4
-                ms.Write([10, 0, (byte)(i / 256), (byte)(i % 256)]); // RDATA
+                builder = builder.Answer([10, 0, (byte)(i / 256), (byte)(i % 256)]);
             }
 
-            return ms.ToArray();
+            return builder.Build();
         });
 
         await using DnsResolver resolver = new(new DnsResolverOptions
@@ -605,9 +602,9 @@ public class DnsResolverRetryTests : IAsyncLifetime
     {
         // Both servers return TC=1 on UDP and drop TCP
         _primary.AddResponse("allfail-tcp.test", DnsRecordType.A, (queryId, qName, isTcp) =>
-            isTcp ? [] : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A));
+            isTcp ? [] : DnsResponseBuilder.For(queryId, qName, DnsRecordType.A).Truncated().Build());
         _secondary.AddResponse("allfail-tcp.test", DnsRecordType.A, (queryId, qName, isTcp) =>
-            isTcp ? [] : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A));
+            isTcp ? [] : DnsResponseBuilder.For(queryId, qName, DnsRecordType.A).Truncated().Build());
 
         await using DnsResolver resolver = new(new DnsResolverOptions
         {

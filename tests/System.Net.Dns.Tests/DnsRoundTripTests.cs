@@ -11,9 +11,6 @@ public class DnsRoundTripTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         _server = LoopbackDnsServer.Start();
-        _server.AddARecord("roundtrip.test", IPAddress.Parse("10.20.30.40"), ttl: 120);
-        _server.AddAAAARecord("roundtrip.test", IPAddress.Parse("::1"), ttl: 60);
-        _server.AddNxDomain("nonexistent.test", DnsRecordType.A);
         await Task.CompletedTask;
     }
 
@@ -30,6 +27,7 @@ public class DnsRoundTripTests : IAsyncLifetime
     [Fact]
     public async Task ARecord_RoundTrip()
     {
+        _server.AddResponse("roundtrip.test", DnsRecordType.A, b => b.Answer([10, 20, 30, 40], ttl: 120));
         byte[] query = BuildQuery(0x1001, "roundtrip.test", DnsRecordType.A);
         byte[] response = await SendQueryAsync(query);
 
@@ -55,6 +53,7 @@ public class DnsRoundTripTests : IAsyncLifetime
     [Fact]
     public async Task AAAARecord_RoundTrip()
     {
+        _server.AddResponse("roundtrip.test", DnsRecordType.AAAA, b => b.Answer(IPAddress.Parse("::1").GetAddressBytes(), ttl: 60));
         byte[] query = BuildQuery(0x1002, "roundtrip.test", DnsRecordType.AAAA);
         byte[] response = await SendQueryAsync(query);
 
@@ -70,6 +69,7 @@ public class DnsRoundTripTests : IAsyncLifetime
     [Fact]
     public async Task Nxdomain_RoundTrip()
     {
+        _server.AddResponse("nonexistent.test", DnsRecordType.A, b => b.ResponseCode(DnsResponseCode.NameError));
         byte[] query = BuildQuery(0x1003, "nonexistent.test", DnsRecordType.A);
         byte[] response = await SendQueryAsync(query);
 
@@ -92,6 +92,7 @@ public class DnsRoundTripTests : IAsyncLifetime
     public async Task QueryId_EchoedCorrectly()
     {
         // Send multiple queries with different IDs
+        _server.AddResponse("roundtrip.test", DnsRecordType.A, b => b.Answer([10, 20, 30, 40], ttl: 120));
         for (ushort id = 100; id < 103; id++)
         {
             byte[] query = BuildQuery(id, "roundtrip.test", DnsRecordType.A);
