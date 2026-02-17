@@ -82,7 +82,7 @@ public class DnsMessageWriterTests
             3, (byte)'c', (byte)'o', (byte)'m', 0,
             3, (byte)'w', (byte)'w', (byte)'w', 0xC0, 0x00 // www + pointer to example.com
         ];
-        DnsEncodedName compressedName = new(message, 13);
+        Assert.True(DnsEncodedName.TryParse(message, 13, out DnsEncodedName compressedName, out _));
 
         Span<byte> buffer = stackalloc byte[512];
         DnsMessageWriter writer = new(buffer);

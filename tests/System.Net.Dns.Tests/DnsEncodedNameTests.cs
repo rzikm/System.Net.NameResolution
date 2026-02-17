@@ -203,7 +203,7 @@ public class DnsEncodedNameTests
             3, (byte)'w', (byte)'w', (byte)'w', 0xC0, 0x00
         ];
 
-        DnsEncodedName name = new(message, 13);
+        Assert.True(DnsEncodedName.TryParse(message, 13, out DnsEncodedName name, out _));
         Assert.True(name.Equals("www.example.com"));
         Assert.Equal("www.example.com", name.ToString());
     }
@@ -219,22 +219,23 @@ public class DnsEncodedNameTests
             3, (byte)'f', (byte)'o', (byte)'o', 0xC0, 0x00
         ];
 
-        DnsEncodedName name = new(message, 5);
+        Assert.True(DnsEncodedName.TryParse(message, 5, out DnsEncodedName name, out _));
         Assert.True(name.Equals("foo.com"));
     }
 
     [Fact]
-    public void GetWireLength_FlatName()
+    public void TryParse_FlatName_BytesConsumedMatchesEncodedLength()
     {
         Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
-        DnsEncodedName.TryEncode("example.com", buffer, out var name, out int bytesWritten);
-        Assert.Equal(bytesWritten, name.GetWireLength());
+        DnsEncodedName.TryEncode("example.com", buffer, out _, out int bytesWritten);
+        Assert.True(DnsEncodedName.TryParse(buffer, 0, out _, out int consumed));
+        Assert.Equal(bytesWritten, consumed);
     }
 
     [Fact]
-    public void GetWireLength_WithCompressionPointer()
+    public void TryParse_WithCompressionPointer_BytesConsumedIsPointerSize()
     {
-        // Name at offset 13: \x03www\xC0\x00  — 6 bytes wire length (1+3 label + 2 pointer)
+        // Name at offset 13: \x03www\xC0\x00  — 6 bytes consumed (1+3 label + 2 pointer)
         byte[] message =
         [
             7, (byte)'e', (byte)'x', (byte)'a', (byte)'m', (byte)'p', (byte)'l', (byte)'e',
@@ -242,8 +243,8 @@ public class DnsEncodedNameTests
             3, (byte)'w', (byte)'w', (byte)'w', 0xC0, 0x00
         ];
 
-        DnsEncodedName name = new(message, 13);
-        Assert.Equal(6, name.GetWireLength());
+        Assert.True(DnsEncodedName.TryParse(message, 13, out _, out int consumed));
+        Assert.Equal(6, consumed);
     }
 
     [Fact]
@@ -251,7 +252,7 @@ public class DnsEncodedNameTests
     {
         // Pointer at offset 0 that points to itself
         byte[] message = [0xC0, 0x00];
-        DnsEncodedName name = new(message, 0);
+        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
         // Should not infinite-loop; max hop limit kicks in
         List<string> labels = new();
         foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
@@ -266,7 +267,7 @@ public class DnsEncodedNameTests
         // Pointer at offset 0 that points forward to offset 2 (past itself, but within buffer)
         // Offset 2 has another pointer back to offset 0 → loop
         byte[] message = [0xC0, 0x02, 0xC0, 0x00];
-        DnsEncodedName name = new(message, 0);
+        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
         List<string> labels = new();
         foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
             labels.Add(Encoding.ASCII.GetString(label));
@@ -278,7 +279,7 @@ public class DnsEncodedNameTests
     {
         // Multiple pointers chaining: offset 0 → offset 2 → offset 4 → root
         byte[] message = [0xC0, 0x02, 0xC0, 0x04, 0x01, (byte)'a', 0x00];
-        DnsEncodedName name = new(message, 0);
+        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
         Assert.True(name.Equals("a"));
     }
 
@@ -287,7 +288,7 @@ public class DnsEncodedNameTests
     {
         // Pointer to offset 0xFF, far beyond the 4-byte buffer
         byte[] message = [0xC0, 0xFF, 0x00, 0x00];
-        DnsEncodedName name = new(message, 0);
+        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
         DnsLabelEnumerator enumerator = name.EnumerateLabels();
         Assert.False(enumerator.MoveNext());
     }
@@ -477,13 +478,13 @@ public class DnsEncodedNameTests
     }
 
     [Fact]
-    public void GetWireLength_WithCompressionPointer_ReturnsCorrectLength()
+    public void TryParse_CompressionPointer_BytesConsumedIsTwo()
     {
         // "com\0" at offset 0, then pointer at offset 4
         byte[] buffer = [3, (byte)'c', (byte)'o', (byte)'m', 0, 0xC0, 0x00];
-        DnsEncodedName name = new(buffer, 5);
-        // Wire length of a pointer is 2 bytes
-        Assert.Equal(2, name.GetWireLength());
+        Assert.True(DnsEncodedName.TryParse(buffer, 5, out _, out int consumed));
+        // Compression pointer consumes 2 bytes
+        Assert.Equal(2, consumed);
     }
 
     // === IDN (Internationalized Domain Name) Tests ===

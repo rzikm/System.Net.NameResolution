@@ -106,7 +106,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         AddResponse(name, DnsRecordType.A, (queryId, qName, isTcp) =>
             isTcp
                 ? BuildSimpleResponse(queryId, qName, DnsRecordType.A, address.GetAddressBytes(), ttl)
-                : BuildTruncatedResponse(queryId, qName, DnsRecordType.A, address.GetAddressBytes(), ttl));
+                : BuildTruncatedResponse(queryId, qName, DnsRecordType.A));
     }
 
     /// <summary>
@@ -133,7 +133,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     public void AddNoData(string name, DnsRecordType type, string soaName = "test", uint soaMinTtl = 60)
     {
         AddResponse(name, type, (queryId, qName, _) =>
-            BuildNoDataResponse(queryId, qName, type, soaName, soaMinTtl));
+            BuildResponseWithSoa(queryId, qName, type, DnsResponseCode.NoError, soaName, soaMinTtl));
     }
 
     /// <summary>
@@ -142,7 +142,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     public void AddNxDomainWithSoa(string name, DnsRecordType type, string soaName = "test", uint soaMinTtl = 60)
     {
         AddResponse(name, type, (queryId, qName, _) =>
-            BuildNxDomainWithSoaResponse(queryId, qName, type, soaName, soaMinTtl));
+            BuildResponseWithSoa(queryId, qName, type, DnsResponseCode.NameError, soaName, soaMinTtl));
     }
 
     /// <summary>
@@ -154,68 +154,310 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
             BuildSrvResponse(queryId, qName, entries));
     }
 
+    /// <summary>
+    /// Convenience: adds a custom response builder for full control.
+    /// </summary>
+    public delegate byte[] ResponseBuilder(ushort queryId, byte[] questionName, bool isTcp);
+
+    // --- Response builders using product primitives ---
+
+    private static DnsEncodedName ParseName(byte[] nameBytes)
+    {
+        DnsEncodedName.TryParse(nameBytes, 0, out DnsEncodedName name, out _);
+        return name;
+    }
+
+    /// <summary>
+    /// Writes a resource record (name + type + class + TTL + RDLENGTH + RDATA) into the buffer
+    /// at the position indicated by <paramref name="writer"/>'s BytesWritten, then advances the writer
+    /// by writing an equivalent number of padding bytes via TryWriteQuestion is not possible...
+    /// Instead, writes directly into the buffer after the writer's current position.
+    /// </summary>
+    private static void WriteRecord(Span<byte> buf, ref int offset, scoped DnsEncodedName name,
+        DnsRecordType type, uint ttl, ReadOnlySpan<byte> rdata, DnsRecordClass @class = DnsRecordClass.Internet)
+    {
+        // Write name (flat, expanding compression pointers)
+        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
+        {
+            buf[offset++] = (byte)label.Length;
+            label.CopyTo(buf[offset..]);
+            offset += label.Length;
+        }
+        buf[offset++] = 0; // root label
+
+        BinaryPrimitives.WriteUInt16BigEndian(buf[offset..], (ushort)type);
+        BinaryPrimitives.WriteUInt16BigEndian(buf[(offset + 2)..], (ushort)@class);
+        BinaryPrimitives.WriteUInt32BigEndian(buf[(offset + 4)..], ttl);
+        BinaryPrimitives.WriteUInt16BigEndian(buf[(offset + 8)..], (ushort)rdata.Length);
+        offset += 10;
+
+        rdata.CopyTo(buf[offset..]);
+        offset += rdata.Length;
+    }
+
+    internal static byte[] BuildSimpleResponse(ushort queryId, byte[] questionName,
+        DnsRecordType type, byte[] rdata, uint ttl)
+    {
+        DnsEncodedName qName = ParseName(questionName);
+        Span<byte> buf = stackalloc byte[512];
+        DnsMessageWriter writer = new(buf);
+
+        writer.TryWriteHeader(ResponseHeader(queryId, questionCount: 1, answerCount: 1));
+        writer.TryWriteQuestion(qName, type);
+
+        int offset = writer.BytesWritten;
+        WriteRecord(buf, ref offset, qName, type, ttl, rdata);
+
+        return buf[..offset].ToArray();
+    }
+
+    internal static byte[] BuildTruncatedResponse(ushort queryId, byte[] questionName, DnsRecordType type)
+    {
+        DnsEncodedName qName = ParseName(questionName);
+        Span<byte> buf = stackalloc byte[512];
+        DnsMessageWriter writer = new(buf);
+
+        writer.TryWriteHeader(ResponseHeader(queryId, flags: DnsHeaderFlags.Truncation, questionCount: 1));
+        writer.TryWriteQuestion(qName, type);
+
+        return buf[..writer.BytesWritten].ToArray();
+    }
+
+    internal static byte[] BuildErrorResponse(ushort queryId, byte[] questionName,
+        DnsRecordType type, DnsResponseCode rcode)
+    {
+        DnsEncodedName qName = ParseName(questionName);
+        Span<byte> buf = stackalloc byte[512];
+        DnsMessageWriter writer = new(buf);
+
+        ushort questionCount = (ushort)(questionName.Length > 0 ? 1 : 0);
+        writer.TryWriteHeader(ResponseHeader(queryId, rcode: rcode, questionCount: questionCount));
+
+        if (questionName.Length > 0)
+        {
+            writer.TryWriteQuestion(qName, type);
+        }
+
+        return buf[..writer.BytesWritten].ToArray();
+    }
+
+    private static byte[] BuildCNameAndAResponse(ushort queryId, byte[] questionName,
+        string cname, IPAddress address, uint ttl)
+    {
+        DnsRecordType addrType = address.AddressFamily == AddressFamily.InterNetworkV6
+            ? DnsRecordType.AAAA : DnsRecordType.A;
+
+        DnsEncodedName qName = ParseName(questionName);
+        byte[] cnameEncoded = EncodeName(cname);
+        DnsEncodedName cnameName = ParseName(cnameEncoded);
+
+        Span<byte> buf = stackalloc byte[512];
+        DnsMessageWriter writer = new(buf);
+
+        writer.TryWriteHeader(ResponseHeader(queryId, questionCount: 1, answerCount: 2));
+        writer.TryWriteQuestion(qName, addrType);
+
+        int offset = writer.BytesWritten;
+        WriteRecord(buf, ref offset, qName, DnsRecordType.CNAME, ttl, cnameEncoded);
+        WriteRecord(buf, ref offset, cnameName, addrType, ttl, address.GetAddressBytes());
+
+        return buf[..offset].ToArray();
+    }
+
+    private static byte[] BuildResponseWithSoa(ushort queryId, byte[] questionName,
+        DnsRecordType type, DnsResponseCode rcode, string soaName, uint soaMinTtl)
+    {
+        DnsEncodedName qName = ParseName(questionName);
+        byte[] soaNameEncoded = EncodeName(soaName);
+        DnsEncodedName soaDnsName = ParseName(soaNameEncoded);
+
+        // Build SOA RDATA: mname, rname, serial, refresh, retry, expire, minimum
+        byte[] mname = EncodeName("ns." + soaName);
+        byte[] rname = EncodeName("admin." + soaName);
+        Span<byte> soaRdata = stackalloc byte[mname.Length + rname.Length + 20];
+        mname.CopyTo(soaRdata);
+        rname.CopyTo(soaRdata[mname.Length..]);
+        int fixedStart = mname.Length + rname.Length;
+        BinaryPrimitives.WriteUInt32BigEndian(soaRdata[fixedStart..], 2024010101); // serial
+        BinaryPrimitives.WriteUInt32BigEndian(soaRdata[(fixedStart + 4)..], 3600); // refresh
+        BinaryPrimitives.WriteUInt32BigEndian(soaRdata[(fixedStart + 8)..], 900); // retry
+        BinaryPrimitives.WriteUInt32BigEndian(soaRdata[(fixedStart + 12)..], 604800); // expire
+        BinaryPrimitives.WriteUInt32BigEndian(soaRdata[(fixedStart + 16)..], soaMinTtl); // minimum
+
+        Span<byte> buf = stackalloc byte[512];
+        DnsMessageWriter writer = new(buf);
+
+        writer.TryWriteHeader(ResponseHeader(queryId, rcode: rcode, questionCount: 1, authorityCount: 1));
+        writer.TryWriteQuestion(qName, type);
+
+        int offset = writer.BytesWritten;
+        WriteRecord(buf, ref offset, soaDnsName, DnsRecordType.SOA, soaMinTtl, soaRdata);
+
+        return buf[..offset].ToArray();
+    }
+
     private static byte[] BuildSrvResponse(ushort queryId, byte[] questionName,
         (string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses)[] entries)
     {
-        using MemoryStream ms = new();
+        DnsEncodedName qName = ParseName(questionName);
 
-        // Count additional A/AAAA records
         int additionalCount = 0;
-        foreach ((string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses) e in entries)
+        foreach (var e in entries)
+        {
             if (e.Addresses != null)
-                additionalCount += e.Addresses.Length;
-
-        // Header
-        WriteUInt16BE(ms, queryId);
-        WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
-        WriteUInt16BE(ms, 1); // QDCOUNT
-        WriteUInt16BE(ms, (ushort)entries.Length); // ANCOUNT
-        WriteUInt16BE(ms, 0); // NSCOUNT
-        WriteUInt16BE(ms, (ushort)additionalCount); // ARCOUNT
-
-        // Question echo
-        ms.Write(questionName);
-        WriteUInt16BE(ms, (ushort)DnsRecordType.SRV);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-
-        // SRV answer records
-        foreach ((string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses) e in entries)
-        {
-            // Name: pointer to question name
-            ms.WriteByte(0xC0);
-            ms.WriteByte(0x0C);
-            WriteUInt16BE(ms, (ushort)DnsRecordType.SRV);
-            WriteUInt16BE(ms, 1); // CLASS=IN
-            WriteUInt32BE(ms, e.Ttl);
-
-            byte[] targetBytes = EncodeName(e.Target);
-            WriteUInt16BE(ms, (ushort)(6 + targetBytes.Length)); // RDLENGTH: priority(2)+weight(2)+port(2)+target
-            WriteUInt16BE(ms, e.Priority);
-            WriteUInt16BE(ms, e.Weight);
-            WriteUInt16BE(ms, e.Port);
-            ms.Write(targetBytes);
-        }
-
-        // Additional section: A/AAAA records for targets
-        foreach ((string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses) e in entries)
-        {
-            if (e.Addresses == null) continue;
-            byte[] targetNameBytes = EncodeName(e.Target);
-            foreach (IPAddress addr in e.Addresses)
             {
-                ms.Write(targetNameBytes);
-                DnsRecordType addrType = addr.AddressFamily == AddressFamily.InterNetworkV6
-                    ? DnsRecordType.AAAA : DnsRecordType.A;
-                WriteUInt16BE(ms, (ushort)addrType);
-                WriteUInt16BE(ms, 1); // CLASS=IN
-                WriteUInt32BE(ms, e.Ttl);
-                byte[] addrBytes = addr.GetAddressBytes();
-                WriteUInt16BE(ms, (ushort)addrBytes.Length);
-                ms.Write(addrBytes);
+                additionalCount += e.Addresses.Length;
             }
         }
 
-        return ms.ToArray();
+        Span<byte> buf = stackalloc byte[2048];
+        DnsMessageWriter writer = new(buf);
+
+        writer.TryWriteHeader(ResponseHeader(queryId,
+            questionCount: 1,
+            answerCount: (ushort)entries.Length,
+            additionalCount: (ushort)additionalCount));
+        writer.TryWriteQuestion(qName, DnsRecordType.SRV);
+
+        int offset = writer.BytesWritten;
+
+        // SRV answer records
+        foreach (var e in entries)
+        {
+            byte[] targetBytes = EncodeName(e.Target);
+            byte[] srvRdata = new byte[6 + targetBytes.Length];
+            BinaryPrimitives.WriteUInt16BigEndian(srvRdata, e.Priority);
+            BinaryPrimitives.WriteUInt16BigEndian(srvRdata.AsSpan(2), e.Weight);
+            BinaryPrimitives.WriteUInt16BigEndian(srvRdata.AsSpan(4), e.Port);
+            targetBytes.CopyTo(srvRdata.AsSpan(6));
+
+            WriteRecord(buf, ref offset, qName, DnsRecordType.SRV, e.Ttl, srvRdata);
+        }
+
+        // Additional section: A/AAAA records for targets
+        foreach (var e in entries)
+        {
+            if (e.Addresses == null)
+            {
+                continue;
+            }
+
+            byte[] targetBytes = EncodeName(e.Target);
+            DnsEncodedName targetName = ParseName(targetBytes);
+            foreach (IPAddress addr in e.Addresses)
+            {
+                DnsRecordType addrType = addr.AddressFamily == AddressFamily.InterNetworkV6
+                    ? DnsRecordType.AAAA : DnsRecordType.A;
+                WriteRecord(buf, ref offset, targetName, addrType, e.Ttl, addr.GetAddressBytes());
+            }
+        }
+
+        return buf[..offset].ToArray();
+    }
+
+    /// <summary>
+    /// Builds a response with a valid header and question echo, but with ANCOUNT set
+    /// to a value higher than the actual number of answer records in the body.
+    /// </summary>
+    internal static byte[] BuildResponseWithMissingAnswers(ushort queryId, byte[] questionName,
+        DnsRecordType type, ushort claimedAnswerCount)
+    {
+        DnsEncodedName qName = ParseName(questionName);
+        Span<byte> buf = stackalloc byte[512];
+        DnsMessageWriter writer = new(buf);
+
+        writer.TryWriteHeader(ResponseHeader(queryId, questionCount: 1, answerCount: claimedAnswerCount));
+        writer.TryWriteQuestion(qName, type);
+
+        return buf[..writer.BytesWritten].ToArray();
+    }
+
+    /// <summary>
+    /// Builds a response where the question section claims QDCOUNT questions
+    /// but the body does not contain any question data beyond the header.
+    /// </summary>
+    internal static byte[] BuildResponseWithMissingQuestions(ushort queryId, ushort claimedQuestionCount)
+    {
+        Span<byte> buf = stackalloc byte[512];
+        DnsMessageWriter writer = new(buf);
+
+        writer.TryWriteHeader(ResponseHeader(queryId, questionCount: claimedQuestionCount));
+
+        return buf[..writer.BytesWritten].ToArray();
+    }
+
+    /// <summary>
+    /// Builds a response with valid question and answer, but with NSCOUNT set higher
+    /// than actual authority records present (zero).
+    /// </summary>
+    internal static byte[] BuildResponseWithMissingAuthority(ushort queryId, byte[] questionName,
+        DnsRecordType type, byte[] rdata, uint ttl, ushort claimedAuthorityCount)
+    {
+        DnsEncodedName qName = ParseName(questionName);
+        Span<byte> buf = stackalloc byte[512];
+        DnsMessageWriter writer = new(buf);
+
+        writer.TryWriteHeader(ResponseHeader(queryId, questionCount: 1, answerCount: 1, authorityCount: claimedAuthorityCount));
+        writer.TryWriteQuestion(qName, type);
+
+        int offset = writer.BytesWritten;
+        WriteRecord(buf, ref offset, qName, type, ttl, rdata);
+
+        return buf[..offset].ToArray();
+    }
+
+    /// <summary>
+    /// Builds an NXDOMAIN response with SOA in authority, but the SOA RDATA is truncated.
+    /// This must be built manually since the writer doesn't support writing malformed records.
+    /// </summary>
+    internal static byte[] BuildNxDomainWithTruncatedSoa(ushort queryId, byte[] questionName,
+        DnsRecordType type)
+    {
+        DnsEncodedName qName = ParseName(questionName);
+        byte[] soaNameBytes = EncodeName("test");
+        DnsEncodedName soaName = ParseName(soaNameBytes);
+
+        Span<byte> buf = stackalloc byte[512];
+        DnsMessageWriter writer = new(buf);
+
+        writer.TryWriteHeader(ResponseHeader(queryId, rcode: DnsResponseCode.NameError, questionCount: 1, authorityCount: 1));
+        writer.TryWriteQuestion(qName, type);
+
+        // Write a SOA record with RDLENGTH claiming 50 bytes but only 4 bytes of actual data.
+        // We write the record fields manually with a mismatched RDLENGTH.
+        int offset = writer.BytesWritten;
+        WriteRecord(buf, ref offset, soaName, DnsRecordType.SOA, 60, new byte[4]);
+
+        // Patch the RDLENGTH to claim 50 bytes instead of the actual 4
+        int rdLengthOffset = offset - 4 - 2; // back past rdata(4) and rdlength(2)
+        BinaryPrimitives.WriteUInt16BigEndian(buf[rdLengthOffset..], 50);
+
+        return buf[..offset].ToArray();
+    }
+
+    /// <summary>
+    /// Creates a standard response header with common defaults (QR=1, RD=1, RA=1).
+    /// </summary>
+    private static DnsMessageHeader ResponseHeader(
+        ushort id,
+        DnsResponseCode rcode = DnsResponseCode.NoError,
+        DnsHeaderFlags flags = default,
+        ushort questionCount = 0,
+        ushort answerCount = 0,
+        ushort authorityCount = 0,
+        ushort additionalCount = 0)
+    {
+        return new DnsMessageHeader
+        {
+            Id = id,
+            IsResponse = true,
+            Flags = DnsHeaderFlags.RecursionDesired | DnsHeaderFlags.RecursionAvailable | flags,
+            ResponseCode = rcode,
+            QuestionCount = questionCount,
+            AnswerCount = answerCount,
+            AuthorityCount = authorityCount,
+            AdditionalCount = additionalCount,
+        };
     }
 
     internal static byte[] EncodeName(string name)
@@ -224,11 +466,6 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         DnsEncodedName.TryEncode(name, buf, out _, out int written);
         return buf[..written].ToArray();
     }
-
-    /// <summary>
-    /// Convenience: adds a custom response builder for full control.
-    /// </summary>
-    public delegate byte[] ResponseBuilder(ushort queryId, byte[] questionName, bool isTcp);
 
     private async Task ListenUdpAsync(CancellationToken ct)
     {
@@ -352,7 +589,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         DnsRecordType qType = (DnsRecordType)BinaryPrimitives.ReadUInt16BigEndian(query.AsSpan(pos));
 
         // Decode the name for lookup
-        DnsEncodedName encodedName = new(query, nameStart);
+        DnsEncodedName.TryParse(query, nameStart, out DnsEncodedName encodedName, out _);
         string nameStr = encodedName.ToString();
 
         if (_responses.TryGetValue((nameStr.ToLowerInvariant(), qType), out var builder))
@@ -360,292 +597,6 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
 
         // Default: NXDOMAIN
         return BuildErrorResponse(queryId, questionName, qType, DnsResponseCode.NameError);
-    }
-
-    internal static byte[] BuildSimpleResponse(ushort queryId, byte[] questionName,
-        DnsRecordType type, byte[] rdata, uint ttl)
-    {
-        using MemoryStream ms = new();
-        // Header
-        WriteUInt16BE(ms, queryId);
-        WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
-        WriteUInt16BE(ms, 1); // QDCOUNT
-        WriteUInt16BE(ms, 1); // ANCOUNT
-        WriteUInt16BE(ms, 0); // NSCOUNT
-        WriteUInt16BE(ms, 0); // ARCOUNT
-
-        // Question echo
-        ms.Write(questionName);
-        WriteUInt16BE(ms, (ushort)type);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-
-        // Answer with compression pointer to offset 12 (question name)
-        ms.WriteByte(0xC0);
-        ms.WriteByte(0x0C);
-        WriteUInt16BE(ms, (ushort)type);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-        WriteUInt32BE(ms, ttl);
-        WriteUInt16BE(ms, (ushort)rdata.Length);
-        ms.Write(rdata);
-
-        return ms.ToArray();
-    }
-
-    internal static byte[] BuildCNameAndAResponse(ushort queryId, byte[] questionName,
-        string cname, IPAddress address, uint ttl)
-    {
-        byte[] cnameEncoded = EncodeName(cname);
-        byte[] addrBytes = address.GetAddressBytes();
-        DnsRecordType addrType = address.AddressFamily == AddressFamily.InterNetworkV6
-            ? DnsRecordType.AAAA : DnsRecordType.A;
-
-        using MemoryStream ms = new();
-        // Header
-        WriteUInt16BE(ms, queryId);
-        WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
-        WriteUInt16BE(ms, 1); // QDCOUNT
-        WriteUInt16BE(ms, 2); // ANCOUNT (CNAME + A)
-        WriteUInt16BE(ms, 0); // NSCOUNT
-        WriteUInt16BE(ms, 0); // ARCOUNT
-
-        // Question echo
-        ms.Write(questionName);
-        WriteUInt16BE(ms, (ushort)addrType);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-
-        // Answer 1: CNAME
-        ms.WriteByte(0xC0); ms.WriteByte(0x0C); // pointer to question name
-        WriteUInt16BE(ms, (ushort)DnsRecordType.CNAME);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-        WriteUInt32BE(ms, ttl);
-        WriteUInt16BE(ms, (ushort)cnameEncoded.Length);
-        ms.Write(cnameEncoded);
-
-        // Answer 2: A/AAAA for the CNAME target
-        ms.Write(cnameEncoded);
-        WriteUInt16BE(ms, (ushort)addrType);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-        WriteUInt32BE(ms, ttl);
-        WriteUInt16BE(ms, (ushort)addrBytes.Length);
-        ms.Write(addrBytes);
-
-        return ms.ToArray();
-    }
-
-    internal static byte[] BuildTruncatedResponse(ushort queryId, byte[] questionName,
-        DnsRecordType type, byte[] rdata, uint ttl)
-    {
-        using MemoryStream ms = new MemoryStream();
-        // Header: QR=1, TC=1, RD=1, RA=1 => 0x8380
-        WriteUInt16BE(ms, queryId);
-        WriteUInt16BE(ms, 0x8380);
-        WriteUInt16BE(ms, 1); // QDCOUNT
-        WriteUInt16BE(ms, 0); // ANCOUNT (truncated, no answers)
-        WriteUInt16BE(ms, 0); // NSCOUNT
-        WriteUInt16BE(ms, 0); // ARCOUNT
-
-        // Question echo
-        ms.Write(questionName);
-        WriteUInt16BE(ms, (ushort)type);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-
-        return ms.ToArray();
-    }
-
-    internal static byte[] BuildErrorResponse(ushort queryId, byte[] questionName,
-        DnsRecordType type, DnsResponseCode rcode)
-    {
-        using MemoryStream ms = new();
-        // Header: QR=1, RD=1, RA=1, RCODE
-        ushort flags = (ushort)(0x8180 | (ushort)rcode);
-        WriteUInt16BE(ms, queryId);
-        WriteUInt16BE(ms, flags);
-        WriteUInt16BE(ms, (ushort)(questionName.Length > 0 ? 1 : 0)); // QDCOUNT
-        WriteUInt16BE(ms, 0); // ANCOUNT
-        WriteUInt16BE(ms, 0); // NSCOUNT
-        WriteUInt16BE(ms, 0); // ARCOUNT
-
-        if (questionName.Length > 0)
-        {
-            ms.Write(questionName);
-            WriteUInt16BE(ms, (ushort)type);
-            WriteUInt16BE(ms, 1); // CLASS=IN
-        }
-
-        return ms.ToArray();
-    }
-
-    private static byte[] BuildNoDataResponse(ushort queryId, byte[] questionName,
-        DnsRecordType type, string soaName, uint soaMinTtl)
-    {
-        return BuildResponseWithSoa(queryId, questionName, type, DnsResponseCode.NoError, soaName, soaMinTtl);
-    }
-
-    private static byte[] BuildNxDomainWithSoaResponse(ushort queryId, byte[] questionName,
-        DnsRecordType type, string soaName, uint soaMinTtl)
-    {
-        return BuildResponseWithSoa(queryId, questionName, type, DnsResponseCode.NameError, soaName, soaMinTtl);
-    }
-
-    private static byte[] BuildResponseWithSoa(ushort queryId, byte[] questionName,
-        DnsRecordType type, DnsResponseCode rcode, string soaName, uint soaMinTtl)
-    {
-        using MemoryStream ms = new();
-        ushort flags = (ushort)(0x8180 | (ushort)rcode);
-        WriteUInt16BE(ms, queryId);
-        WriteUInt16BE(ms, flags);
-        WriteUInt16BE(ms, 1); // QDCOUNT
-        WriteUInt16BE(ms, 0); // ANCOUNT
-        WriteUInt16BE(ms, 1); // NSCOUNT (SOA)
-        WriteUInt16BE(ms, 0); // ARCOUNT
-
-        // Question
-        ms.Write(questionName);
-        WriteUInt16BE(ms, (ushort)type);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-
-        // Authority: SOA record
-        byte[] soaNameEncoded = EncodeName(soaName);
-        ms.Write(soaNameEncoded);
-        WriteUInt16BE(ms, (ushort)DnsRecordType.SOA);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-        WriteUInt32BE(ms, soaMinTtl); // TTL = soaMinTtl (for simplicity, same as minimum)
-
-        // SOA RDATA: mname, rname, serial, refresh, retry, expire, minimum
-        byte[] mname = EncodeName("ns." + soaName);
-        byte[] rname = EncodeName("admin." + soaName);
-        ushort rdLength = (ushort)(mname.Length + rname.Length + 20); // 5 x uint32
-        WriteUInt16BE(ms, rdLength);
-        ms.Write(mname);
-        ms.Write(rname);
-        WriteUInt32BE(ms, 2024010101); // serial
-        WriteUInt32BE(ms, 3600); // refresh
-        WriteUInt32BE(ms, 900); // retry
-        WriteUInt32BE(ms, 604800); // expire
-        WriteUInt32BE(ms, soaMinTtl); // minimum
-
-        return ms.ToArray();
-    }
-
-    /// <summary>
-    /// Builds a response with a valid header and question echo, but with ANCOUNT set
-    /// to a value higher than the actual number of answer records in the body.
-    /// This simulates a response where the answer section is truncated/malformed.
-    /// </summary>
-    internal static byte[] BuildResponseWithMissingAnswers(ushort queryId, byte[] questionName,
-        DnsRecordType type, ushort claimedAnswerCount)
-    {
-        using MemoryStream ms = new();
-        WriteUInt16BE(ms, queryId);
-        WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
-        WriteUInt16BE(ms, 1); // QDCOUNT
-        WriteUInt16BE(ms, claimedAnswerCount); // ANCOUNT — but no actual records follow
-        WriteUInt16BE(ms, 0); // NSCOUNT
-        WriteUInt16BE(ms, 0); // ARCOUNT
-
-        // Question echo
-        ms.Write(questionName);
-        WriteUInt16BE(ms, (ushort)type);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-
-        return ms.ToArray();
-    }
-
-    /// <summary>
-    /// Builds a response where the question section claims QDCOUNT questions
-    /// but the body does not contain any question data beyond the header.
-    /// </summary>
-    internal static byte[] BuildResponseWithMissingQuestions(ushort queryId, ushort claimedQuestionCount)
-    {
-        using MemoryStream ms = new();
-        WriteUInt16BE(ms, queryId);
-        WriteUInt16BE(ms, 0x8180); // QR=1, RD=1, RA=1
-        WriteUInt16BE(ms, claimedQuestionCount); // QDCOUNT — but no question data follows
-        WriteUInt16BE(ms, 0); // ANCOUNT
-        WriteUInt16BE(ms, 0); // NSCOUNT
-        WriteUInt16BE(ms, 0); // ARCOUNT
-
-        // No question body — just the 12-byte header
-        return ms.ToArray();
-    }
-
-    /// <summary>
-    /// Builds a response with valid question and answer, but with NSCOUNT set higher
-    /// than actual authority records present (zero).
-    /// </summary>
-    internal static byte[] BuildResponseWithMissingAuthority(ushort queryId, byte[] questionName,
-        DnsRecordType type, byte[] rdata, uint ttl, ushort claimedAuthorityCount)
-    {
-        using MemoryStream ms = new();
-        WriteUInt16BE(ms, queryId);
-        WriteUInt16BE(ms, 0x8180);
-        WriteUInt16BE(ms, 1); // QDCOUNT
-        WriteUInt16BE(ms, 1); // ANCOUNT
-        WriteUInt16BE(ms, claimedAuthorityCount); // NSCOUNT — but no authority records follow
-        WriteUInt16BE(ms, 0); // ARCOUNT
-
-        // Question echo
-        ms.Write(questionName);
-        WriteUInt16BE(ms, (ushort)type);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-
-        // One valid answer record
-        ms.WriteByte(0xC0); ms.WriteByte(0x0C); // pointer to question name
-        WriteUInt16BE(ms, (ushort)type);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-        WriteUInt32BE(ms, ttl);
-        WriteUInt16BE(ms, (ushort)rdata.Length);
-        ms.Write(rdata);
-
-        // No authority records despite NSCOUNT > 0
-        return ms.ToArray();
-    }
-
-    /// <summary>
-    /// Builds an NXDOMAIN response with SOA in authority, but the SOA RDATA is truncated.
-    /// </summary>
-    internal static byte[] BuildNxDomainWithTruncatedSoa(ushort queryId, byte[] questionName,
-        DnsRecordType type)
-    {
-        using MemoryStream ms = new();
-        ushort flags = (ushort)(0x8180 | (ushort)DnsResponseCode.NameError);
-        WriteUInt16BE(ms, queryId);
-        WriteUInt16BE(ms, flags);
-        WriteUInt16BE(ms, 1); // QDCOUNT
-        WriteUInt16BE(ms, 0); // ANCOUNT
-        WriteUInt16BE(ms, 1); // NSCOUNT — SOA record claimed
-        WriteUInt16BE(ms, 0); // ARCOUNT
-
-        // Question
-        ms.Write(questionName);
-        WriteUInt16BE(ms, (ushort)type);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-
-        // SOA record with RDLENGTH claiming 50 bytes but only 4 bytes present
-        byte[] soaName = EncodeName("test");
-        ms.Write(soaName);
-        WriteUInt16BE(ms, (ushort)DnsRecordType.SOA);
-        WriteUInt16BE(ms, 1); // CLASS=IN
-        WriteUInt32BE(ms, 60); // TTL
-        WriteUInt16BE(ms, 50); // RDLENGTH — but data below is shorter than 50 bytes
-        // Only write 4 bytes instead of 50
-        ms.Write(new byte[] { 0x00, 0x00, 0x00, 0x00 });
-
-        return ms.ToArray();
-    }
-
-    private static void WriteUInt16BE(MemoryStream ms, ushort value)
-    {
-        Span<byte> buf = stackalloc byte[2];
-        BinaryPrimitives.WriteUInt16BigEndian(buf, value);
-        ms.Write(buf);
-    }
-
-    private static void WriteUInt32BE(MemoryStream ms, uint value)
-    {
-        Span<byte> buf = stackalloc byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(buf, value);
-        ms.Write(buf);
     }
 
     public async ValueTask DisposeAsync()

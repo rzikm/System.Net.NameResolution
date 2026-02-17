@@ -7,8 +7,4 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
-  <ItemGroup>
-    <InternalsVisibleTo Include="System.Net.Dns.Tests" />
-  </ItemGroup>
-
 </Project>

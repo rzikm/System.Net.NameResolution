@@ -4,6 +4,23 @@ namespace System.Net.Dns.Tests;
 
 public class DnsMessageHeaderTests
 {
+    // Helper: writes header via DnsMessageWriter, returns the written bytes.
+    private static byte[] WriteHeader(in DnsMessageHeader header)
+    {
+        Span<byte> buffer = stackalloc byte[512];
+        DnsMessageWriter writer = new(buffer);
+        Assert.True(writer.TryWriteHeader(in header));
+        return buffer[..writer.BytesWritten].ToArray();
+    }
+
+    // Helper: writes header then reads it back via DnsMessageReader.
+    private static DnsMessageHeader RoundTrip(in DnsMessageHeader header)
+    {
+        byte[] bytes = WriteHeader(in header);
+        Assert.True(DnsMessageReader.TryCreate(bytes, out DnsMessageReader reader));
+        return reader.Header;
+    }
+
     [Fact]
     public void StandardQuery_SetsDefaults()
     {
@@ -24,10 +41,7 @@ public class DnsMessageHeaderTests
     public void RoundTrip_StandardQuery()
     {
         DnsMessageHeader original = new() { Id = 0xABCD, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 2 };
-        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
-
-        Assert.True(original.TryWrite(buffer));
-        Assert.True(DnsMessageHeader.TryRead(buffer, out var parsed));
+        DnsMessageHeader parsed = RoundTrip(in original);
 
         Assert.Equal(original.Id, parsed.Id);
         Assert.Equal(original.IsResponse, parsed.IsResponse);
@@ -57,9 +71,7 @@ public class DnsMessageHeaderTests
             AdditionalCount = 2,
         };
 
-        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
-        Assert.True(original.TryWrite(buffer));
-        Assert.True(DnsMessageHeader.TryRead(buffer, out var parsed));
+        DnsMessageHeader parsed = RoundTrip(in original);
 
         Assert.True(parsed.IsResponse);
         Assert.Equal(flags, parsed.Flags);
@@ -71,14 +83,10 @@ public class DnsMessageHeaderTests
     [Fact]
     public void RoundTrip_AllResponseCodes()
     {
-        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
-
         foreach (DnsResponseCode rcode in Enum.GetValues<DnsResponseCode>())
         {
             DnsMessageHeader original = new() { IsResponse = true, ResponseCode = rcode };
-
-            Assert.True(original.TryWrite(buffer));
-            Assert.True(DnsMessageHeader.TryRead(buffer, out var parsed));
+            DnsMessageHeader parsed = RoundTrip(in original);
             Assert.Equal(rcode, parsed.ResponseCode);
         }
     }
@@ -86,31 +94,28 @@ public class DnsMessageHeaderTests
     [Fact]
     public void RoundTrip_OpCodes()
     {
-        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
-
         foreach (DnsOpCode opcode in Enum.GetValues<DnsOpCode>())
         {
             DnsMessageHeader original = new() { OpCode = opcode };
-
-            Assert.True(original.TryWrite(buffer));
-            Assert.True(DnsMessageHeader.TryRead(buffer, out var parsed));
+            DnsMessageHeader parsed = RoundTrip(in original);
             Assert.Equal(opcode, parsed.OpCode);
         }
     }
 
     [Fact]
-    public void TryWrite_BufferTooSmall_ReturnsFalse()
+    public void TryWriteHeader_BufferTooSmall_ReturnsFalse()
     {
         DnsMessageHeader header = new() { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Span<byte> buffer = stackalloc byte[11]; // one byte short
-        Assert.False(header.TryWrite(buffer));
+        DnsMessageWriter writer = new(buffer);
+        Assert.False(writer.TryWriteHeader(in header));
     }
 
     [Fact]
-    public void TryRead_BufferTooSmall_ReturnsFalse()
+    public void TryCreate_BufferTooSmall_ReturnsFalse()
     {
         Span<byte> buffer = stackalloc byte[11];
-        Assert.False(DnsMessageHeader.TryRead(buffer, out _));
+        Assert.False(DnsMessageReader.TryCreate(buffer, out _));
     }
 
     [Fact]
@@ -128,9 +133,8 @@ public class DnsMessageHeaderTests
         ];
 
         DnsMessageHeader header = new() { Id = 0x1234, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
-        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
-        Assert.True(header.TryWrite(buffer));
-        Assert.True(buffer.SequenceEqual(expected));
+        byte[] written = WriteHeader(in header);
+        Assert.Equal(expected, written);
     }
 
     [Fact]
@@ -157,9 +161,8 @@ public class DnsMessageHeaderTests
             AnswerCount = 2,
         };
 
-        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
-        Assert.True(header.TryWrite(buffer));
-        Assert.True(buffer.SequenceEqual(expected));
+        byte[] written = WriteHeader(in header);
+        Assert.Equal(expected, written);
     }
 
     [Theory]
@@ -171,11 +174,8 @@ public class DnsMessageHeaderTests
     [InlineData(DnsHeaderFlags.CheckingDisabled)]
     public void RoundTrip_EachFlagIndividually(DnsHeaderFlags flag)
     {
-        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
         DnsMessageHeader original = new() { Flags = flag };
-
-        Assert.True(original.TryWrite(buffer));
-        Assert.True(DnsMessageHeader.TryRead(buffer, out DnsMessageHeader parsed));
+        DnsMessageHeader parsed = RoundTrip(in original);
         Assert.Equal(flag, parsed.Flags);
     }
 
@@ -186,11 +186,18 @@ public class DnsMessageHeaderTests
             | DnsHeaderFlags.RecursionDesired | DnsHeaderFlags.RecursionAvailable
             | DnsHeaderFlags.AuthenticData | DnsHeaderFlags.CheckingDisabled;
 
-        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
         DnsMessageHeader original = new() { IsResponse = true, Flags = allFlags };
-
-        Assert.True(original.TryWrite(buffer));
-        Assert.True(DnsMessageHeader.TryRead(buffer, out DnsMessageHeader parsed));
+        DnsMessageHeader parsed = RoundTrip(in original);
         Assert.Equal(allFlags, parsed.Flags);
+    }
+
+    [Fact]
+    public void TryWriteHeader_WritesExactly12Bytes()
+    {
+        DnsMessageHeader header = new() { Id = 1 };
+        Span<byte> buffer = stackalloc byte[512];
+        DnsMessageWriter writer = new(buffer);
+        Assert.True(writer.TryWriteHeader(in header));
+        Assert.Equal(12, writer.BytesWritten);
     }
 }

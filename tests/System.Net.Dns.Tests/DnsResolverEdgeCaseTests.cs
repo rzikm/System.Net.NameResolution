@@ -129,7 +129,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
                 serverCanContinue.Wait(TimeSpan.FromSeconds(10));
                 return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
             }
-            return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+            return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A);
         });
 
         using DnsResolver resolver = new DnsResolver(new DnsResolverOptions
@@ -171,7 +171,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
                 serverCanContinue.Wait(TimeSpan.FromSeconds(10));
                 return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
             }
-            return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+            return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A);
         });
 
         using DnsResolver resolver = new DnsResolver(new DnsResolverOptions
@@ -498,7 +498,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
         _primary.AddResponse("tcpdrop.test", DnsRecordType.A, (queryId, qName, isTcp) =>
             isTcp
                 ? [] // drop TCP connection
-                : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60));
+                : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A));
 
         // Secondary returns a normal response
         _secondary.AddARecord("tcpdrop.test", IPAddress.Parse("10.0.0.2"));
@@ -529,7 +529,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
             udpCount++;
             if (udpCount == 1)
             {
-                return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+                return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A);
             }
             return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
         });
@@ -557,7 +557,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
         {
             if (!isTcp)
             {
-                return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+                return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A);
             }
 
             // Build a large response with many A records
@@ -605,9 +605,9 @@ public class DnsResolverRetryTests : IAsyncLifetime
     {
         // Both servers return TC=1 on UDP and drop TCP
         _primary.AddResponse("allfail-tcp.test", DnsRecordType.A, (queryId, qName, isTcp) =>
-            isTcp ? [] : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60));
+            isTcp ? [] : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A));
         _secondary.AddResponse("allfail-tcp.test", DnsRecordType.A, (queryId, qName, isTcp) =>
-            isTcp ? [] : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60));
+            isTcp ? [] : LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A));
 
         await using DnsResolver resolver = new(new DnsResolverOptions
         {

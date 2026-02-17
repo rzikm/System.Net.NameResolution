@@ -147,7 +147,7 @@ public class DnsMessageReaderTests
         Assert.True(cname.Name.Equals("www.example.com"));
 
         // The CNAME RDATA contains a compression pointer to "example.com"
-        DnsEncodedName cnameTarget = new(cname.Message, cname.DataOffset);
+        DnsEncodedName.TryParse(cname.Message, cname.DataOffset, out DnsEncodedName cnameTarget, out _);
         Assert.True(cnameTarget.Equals("example.com"));
 
         // A answer
