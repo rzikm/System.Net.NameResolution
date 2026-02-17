@@ -190,7 +190,11 @@ public static class DnsRecordExtensions
         {
             return false;
         }
-        result = new DnsCNameRecordData(new DnsName(record.Message, record.DataOffset));
+        if (!DnsName.TryParse(record.Message, record.DataOffset, out DnsName cname, out _))
+        {
+            return false;
+        }
+        result = new DnsCNameRecordData(cname);
         return true;
     }
 
@@ -202,7 +206,10 @@ public static class DnsRecordExtensions
             return false;
         }
         ushort preference = BinaryPrimitives.ReadUInt16BigEndian(record.Data);
-        DnsName exchange = new DnsName(record.Message, record.DataOffset + 2);
+        if (!DnsName.TryParse(record.Message, record.DataOffset + 2, out DnsName exchange, out _))
+        {
+            return false;
+        }
         result = new DnsMxRecordData(preference, exchange);
         return true;
     }
@@ -217,7 +224,10 @@ public static class DnsRecordExtensions
         ushort priority = BinaryPrimitives.ReadUInt16BigEndian(record.Data);
         ushort weight = BinaryPrimitives.ReadUInt16BigEndian(record.Data[2..]);
         ushort port = BinaryPrimitives.ReadUInt16BigEndian(record.Data[4..]);
-        DnsName target = new DnsName(record.Message, record.DataOffset + 6);
+        if (!DnsName.TryParse(record.Message, record.DataOffset + 6, out DnsName target, out _))
+        {
+            return false;
+        }
         result = new DnsSrvRecordData(priority, weight, port, target);
         return true;
     }
@@ -230,21 +240,13 @@ public static class DnsRecordExtensions
             return false;
         }
 
-        DnsName mname = new DnsName(record.Message, record.DataOffset);
-        int mnameLen = mname.GetWireLength();
-        if (mnameLen < 0)
+        if (!DnsName.TryParse(record.Message, record.DataOffset, out DnsName mname, out int mnameLen))
         {
             return false;
         }
 
         int rnameOffset = record.DataOffset + mnameLen;
-        if (rnameOffset >= record.Message.Length)
-        {
-            return false;
-        }
-        DnsName rname = new DnsName(record.Message, rnameOffset);
-        int rnameLen = rname.GetWireLength();
-        if (rnameLen < 0)
+        if (!DnsName.TryParse(record.Message, rnameOffset, out DnsName rname, out int rnameLen))
         {
             return false;
         }
@@ -283,7 +285,11 @@ public static class DnsRecordExtensions
         {
             return false;
         }
-        result = new DnsPtrRecordData(new DnsName(record.Message, record.DataOffset));
+        if (!DnsName.TryParse(record.Message, record.DataOffset, out DnsName ptr, out _))
+        {
+            return false;
+        }
+        result = new DnsPtrRecordData(ptr);
         return true;
     }
 
@@ -294,7 +300,11 @@ public static class DnsRecordExtensions
         {
             return false;
         }
-        result = new DnsNsRecordData(new DnsName(record.Message, record.DataOffset));
+        if (!DnsName.TryParse(record.Message, record.DataOffset, out DnsName ns, out _))
+        {
+            return false;
+        }
+        result = new DnsNsRecordData(ns);
         return true;
     }
 }

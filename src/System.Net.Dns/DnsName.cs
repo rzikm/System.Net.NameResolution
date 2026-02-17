@@ -29,6 +29,40 @@ public readonly ref struct DnsName
     }
 
     /// <summary>
+    /// Attempts to parse a DNS name from a wire-format message buffer at the given offset.
+    /// Validates that the name is well-formed (valid label lengths, no truncation).
+    /// The <paramref name="message"/> buffer is retained by the returned <see cref="DnsName"/>
+    /// to support compression pointer resolution.
+    /// </summary>
+    /// <param name="message">The full DNS message buffer.</param>
+    /// <param name="offset">The byte offset within <paramref name="message"/> where the name starts.</param>
+    /// <param name="name">On success, receives the parsed name.</param>
+    /// <param name="bytesConsumed">On success, receives the number of bytes consumed from the buffer
+    /// at <paramref name="offset"/> (not following compression pointers).</param>
+    /// <returns><c>true</c> if the name was successfully parsed; <c>false</c> if the data is malformed.</returns>
+    public static bool TryParse(ReadOnlySpan<byte> message, int offset, out DnsName name, out int bytesConsumed)
+    {
+        name = default;
+        bytesConsumed = 0;
+
+        if (offset < 0 || offset >= message.Length)
+        {
+            return false;
+        }
+
+        DnsName candidate = new DnsName(message, offset);
+        int wireLen = candidate.GetWireLength();
+        if (wireLen < 0)
+        {
+            return false;
+        }
+
+        name = candidate;
+        bytesConsumed = wireLen;
+        return true;
+    }
+
+    /// <summary>
     /// Gets the underlying buffer (for internal use by reader/writer).
     /// </summary>
     internal ReadOnlySpan<byte> Buffer => _buffer;

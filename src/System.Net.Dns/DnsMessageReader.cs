@@ -90,9 +90,7 @@ public ref struct DnsMessageReader
         }
 
         // Read name
-        DnsName name = new DnsName(_message, _pos);
-        int nameWireLen = name.GetWireLength();
-        if (nameWireLen < 0)
+        if (!DnsName.TryParse(_message, _pos, out DnsName name, out int nameWireLen))
         {
             return false; // malformed name
         }
@@ -126,9 +124,7 @@ public ref struct DnsMessageReader
         }
 
         // Read name
-        DnsName name = new DnsName(_message, _pos);
-        int nameWireLen = name.GetWireLength();
-        if (nameWireLen < 0)
+        if (!DnsName.TryParse(_message, _pos, out DnsName name, out int nameWireLen))
         {
             return false; // malformed name
         }

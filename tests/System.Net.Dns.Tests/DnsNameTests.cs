@@ -308,4 +308,83 @@ public class DnsNameTests
         OperationStatus status = DnsName.TryCreate(nameChars, nameBuf, out _, out _);
         Assert.Equal(OperationStatus.InvalidData, status);
     }
+
+    [Fact]
+    public void TryParse_ValidRootName_Succeeds()
+    {
+        byte[] buffer = [0x00];
+        Assert.True(DnsName.TryParse(buffer, 0, out DnsName name, out int consumed));
+        Assert.Equal(1, consumed);
+        Assert.Equal(".", name.ToString());
+    }
+
+    [Fact]
+    public void TryParse_ValidFlatName_Succeeds()
+    {
+        byte[] buffer = [3, (byte)'w', (byte)'w', (byte)'w', 7, (byte)'e', (byte)'x', (byte)'a', (byte)'m', (byte)'p', (byte)'l', (byte)'e', 3, (byte)'c', (byte)'o', (byte)'m', 0];
+        Assert.True(DnsName.TryParse(buffer, 0, out DnsName name, out int consumed));
+        Assert.Equal(buffer.Length, consumed);
+        Assert.Equal("www.example.com", name.ToString());
+    }
+
+    [Fact]
+    public void TryParse_AtOffset_Succeeds()
+    {
+        // "com" starts at offset 12 in a typical message; simulate with padding
+        byte[] buffer = new byte[5 + 3 + 3 + 1]; // 5 bytes padding + 3-label "com" + root
+        buffer[5] = 3;
+        buffer[6] = (byte)'c';
+        buffer[7] = (byte)'o';
+        buffer[8] = (byte)'m';
+        buffer[9] = 0;
+        Assert.True(DnsName.TryParse(buffer, 5, out DnsName name, out int consumed));
+        Assert.Equal(5, consumed);
+        Assert.Equal("com", name.ToString());
+    }
+
+    [Fact]
+    public void TryParse_WithCompressionPointer_Succeeds()
+    {
+        // Buffer: "com\0" at offset 0, then a pointer to offset 0 at offset 4
+        byte[] buffer = [3, (byte)'c', (byte)'o', (byte)'m', 0, 0xC0, 0x00];
+        Assert.True(DnsName.TryParse(buffer, 5, out DnsName name, out int consumed));
+        Assert.Equal(2, consumed); // compression pointer is 2 bytes
+        Assert.Equal("com", name.ToString());
+    }
+
+    [Fact]
+    public void TryParse_Truncated_ReturnsFalse()
+    {
+        // Label says length 5 but buffer only has 3 more bytes
+        byte[] buffer = [5, (byte)'a', (byte)'b'];
+        Assert.False(DnsName.TryParse(buffer, 0, out _, out _));
+    }
+
+    [Fact]
+    public void TryParse_LabelTooLong_ReturnsFalse()
+    {
+        // Label length byte > 63 and not a pointer (0x40..0xBF range)
+        byte[] buffer = [0x50, 0x00];
+        Assert.False(DnsName.TryParse(buffer, 0, out _, out _));
+    }
+
+    [Fact]
+    public void TryParse_NegativeOffset_ReturnsFalse()
+    {
+        byte[] buffer = [0x00];
+        Assert.False(DnsName.TryParse(buffer, -1, out _, out _));
+    }
+
+    [Fact]
+    public void TryParse_OffsetBeyondBuffer_ReturnsFalse()
+    {
+        byte[] buffer = [0x00];
+        Assert.False(DnsName.TryParse(buffer, 5, out _, out _));
+    }
+
+    [Fact]
+    public void TryParse_EmptyBuffer_ReturnsFalse()
+    {
+        Assert.False(DnsName.TryParse(ReadOnlySpan<byte>.Empty, 0, out _, out _));
+    }
 }

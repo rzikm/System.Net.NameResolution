@@ -127,49 +127,67 @@ static class FuzzTargets
     /// </summary>
     public static void Name(ReadOnlySpan<byte> data)
     {
-        if (data.Length == 0)
+        if (data.Length < 2)
         {
             return;
         }
 
-        // Treat input bytes as characters for name creation
-        Span<char> chars = stackalloc char[data.Length];
-        for (int i = 0; i < data.Length; i++)
+        byte selector = data[0];
+        ReadOnlySpan<byte> payload = data[1..];
+
+        if (selector % 2 == 0)
         {
-            chars[i] = (char)data[i];
-        }
-
-        Span<byte> dest = stackalloc byte[DnsName.MaxEncodedLength];
-        OperationStatus status = DnsName.TryCreate(chars, dest, out DnsName name, out int written);
-
-        if (status == OperationStatus.Done && written > 0)
-        {
-            name.ToString();
-            name.GetFormattedLength();
-            name.Equals(new string(chars));
-            name.Equals("example.com");
-
-            Span<char> fmtBuf = stackalloc char[256];
-            name.TryFormat(fmtBuf, out _);
-
-            foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
+            // Exercise TryParse: treat payload as wire-format message buffer
+            int offset = payload[0] % payload.Length;
+            if (DnsName.TryParse(payload, offset, out DnsName name, out int bytesConsumed))
             {
-                _ = label.Length;
+                name.ToString();
+                name.GetFormattedLength();
+                name.Equals("example.com");
+
+                foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
+                {
+                    _ = label.Length;
+                }
+            }
+        }
+        else
+        {
+            // Exercise TryCreate: treat payload as characters for name creation
+            Span<char> chars = stackalloc char[payload.Length];
+            for (int i = 0; i < payload.Length; i++)
+            {
+                chars[i] = (char)payload[i];
             }
 
-            // Also write the name into a message and read it back
-            Span<byte> msgBuf = stackalloc byte[512];
-            DnsMessageWriter writer = new DnsMessageWriter(msgBuf);
-            writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(0x0001));
-            writer.TryWriteQuestion(name, DnsRecordType.A);
+            Span<byte> dest = stackalloc byte[DnsName.MaxEncodedLength];
+            OperationStatus status = DnsName.TryCreate(chars, dest, out DnsName name, out int written);
 
-            if (writer.BytesWritten >= 12)
+            if (status == OperationStatus.Done && written > 0)
             {
-                DnsMessageReader reader = new DnsMessageReader(msgBuf[..writer.BytesWritten]);
-                if (reader.TryReadQuestion(out DnsQuestion q))
+                name.ToString();
+                name.GetFormattedLength();
+                name.Equals(new string(chars));
+
+                foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
                 {
-                    q.Name.ToString();
-                    q.Name.Equals(chars);
+                    _ = label.Length;
+                }
+
+                // Also write the name into a message and read it back
+                Span<byte> msgBuf = stackalloc byte[512];
+                DnsMessageWriter writer = new DnsMessageWriter(msgBuf);
+                writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(0x0001));
+                writer.TryWriteQuestion(name, DnsRecordType.A);
+
+                if (writer.BytesWritten >= 12)
+                {
+                    DnsMessageReader reader = new DnsMessageReader(msgBuf[..writer.BytesWritten]);
+                    if (reader.TryReadQuestion(out DnsQuestion q))
+                    {
+                        q.Name.ToString();
+                        q.Name.Equals(chars);
+                    }
                 }
             }
         }
