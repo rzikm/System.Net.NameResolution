@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Buffers.Binary;
 using System.IO;
 using System.Net.Sockets;
 
@@ -12,6 +13,9 @@ public class DnsResolver : IAsyncDisposable, IDisposable
 {
     // Max UDP DNS message size (without EDNS0)
     private const int MaxUdpResponseSize = 512;
+
+    // Max TCP DNS message size (2-byte length prefix allows up to 65535)
+    private const int MaxTcpResponseSize = 65535;
 
     private readonly DnsResolverOptions _options;
     private volatile bool _disposed;
@@ -40,12 +44,11 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         DnsResponseCode worstResponseCode = DnsResponseCode.NoError;
         DateTimeOffset? negativeCacheExpires = null;
 
-        byte[] responseBuf = ArrayPool<byte>.Shared.Rent(MaxUdpResponseSize);
-        try
+        if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetwork)
         {
-            if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetwork)
+            (byte[] responseBuf, int responseLength) = await SendQueryAsync(hostName, DnsRecordType.A, cancellationToken);
+            try
             {
-                int responseLength = await SendQueryAsync(hostName, DnsRecordType.A, responseBuf, cancellationToken);
                 (DnsResponseCode rcode, DateTimeOffset? negExpires) = CollectAddresses(responseBuf.AsSpan(0, responseLength), now, results);
                 if (rcode != DnsResponseCode.NoError)
                 {
@@ -53,10 +56,17 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                     negativeCacheExpires = negExpires;
                 }
             }
-
-            if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetworkV6)
+            finally
             {
-                int responseLength = await SendQueryAsync(hostName, DnsRecordType.AAAA, responseBuf, cancellationToken);
+                ArrayPool<byte>.Shared.Return(responseBuf);
+            }
+        }
+
+        if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetworkV6)
+        {
+            (byte[] responseBuf, int responseLength) = await SendQueryAsync(hostName, DnsRecordType.AAAA, cancellationToken);
+            try
+            {
                 (DnsResponseCode rcode, DateTimeOffset? negExpires) = CollectAddresses(responseBuf.AsSpan(0, responseLength), now, results);
                 if (rcode != DnsResponseCode.NoError && worstResponseCode == DnsResponseCode.NoError)
                 {
@@ -64,10 +74,10 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                     negativeCacheExpires = negExpires;
                 }
             }
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(responseBuf);
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(responseBuf);
+            }
         }
 
         // If we got any addresses, treat as success regardless of individual query codes
@@ -90,10 +100,9 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrEmpty(serviceName);
 
-        byte[] responseBuf = ArrayPool<byte>.Shared.Rent(MaxUdpResponseSize);
+        (byte[] responseBuf, int responseLength) = await SendQueryAsync(serviceName, DnsRecordType.SRV, cancellationToken);
         try
         {
-            int responseLength = await SendQueryAsync(serviceName, DnsRecordType.SRV, responseBuf, cancellationToken);
             ReadOnlySpan<byte> responseSpan = responseBuf.AsSpan(0, responseLength);
             if (!DnsMessageReader.TryCreate(responseSpan, out DnsMessageReader reader))
             {
@@ -195,34 +204,30 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrEmpty(name);
 
-        byte[] responseBuf = ArrayPool<byte>.Shared.Rent(MaxUdpResponseSize);
-        bool success = false;
+        (byte[] responseBuf, int responseLength) = await SendQueryAsync(name, type, cancellationToken);
         try
         {
-            int responseLength = await SendQueryAsync(name, type, responseBuf, cancellationToken);
             if (!DnsMessageReader.TryCreate(responseBuf.AsSpan(0, responseLength), out DnsMessageReader reader))
             {
                 throw new InvalidDataException("DNS response too small for header.");
             }
             DnsQueryResult result = new DnsQueryResult(reader.Header.ResponseCode, reader.Header.Flags, responseBuf, responseLength);
-            success = true;
             return result;
         }
-        finally
+        catch
         {
-            if (!success)
-            {
-                ArrayPool<byte>.Shared.Return(responseBuf);
-            }
+            ArrayPool<byte>.Shared.Return(responseBuf);
+            throw;
         }
     }
 
     /// <summary>
-    /// Sends a DNS query, writes the validated response into <paramref name="responseBuffer"/>,
-    /// and returns the number of bytes written. Handles retries and server failover.
+    /// Sends a DNS query, validates the response, and handles TCP fallback if the
+    /// response is truncated (TC bit). Returns the response buffer (rented from ArrayPool)
+    /// and the number of valid bytes. The caller must return the buffer to the pool.
     /// </summary>
-    private async Task<int> SendQueryAsync(string name, DnsRecordType type,
-        byte[] responseBuffer, CancellationToken ct)
+    private async Task<(byte[] Buffer, int Length)> SendQueryAsync(
+        string name, DnsRecordType type, CancellationToken ct)
     {
         // Build query message on the stack
         Span<byte> nameBuf = stackalloc byte[DnsEncodedName.MaxEncodedLength];
@@ -250,6 +255,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
             throw new InvalidOperationException("No DNS servers configured.");
         }
 
+        byte[] responseBuffer = ArrayPool<byte>.Shared.Rent(MaxUdpResponseSize);
         Exception? lastException = null;
 
         try
@@ -294,7 +300,45 @@ public class DnsResolver : IAsyncDisposable, IDisposable
                             continue;
                         }
 
-                        return responseLength;
+                        // TCP fallback if response is truncated
+                        if (header.Flags.HasFlag(DnsHeaderFlags.Truncation))
+                        {
+                            try
+                            {
+                                byte[] tcpBuffer = ArrayPool<byte>.Shared.Rent(MaxTcpResponseSize);
+                                try
+                                {
+                                    int tcpLength = await SendTcpQueryAsync(
+                                        queryBytes.AsMemory(0, queryLength), server, tcpBuffer, ct);
+
+                                    // Return the original UDP buffer and use the TCP buffer instead
+                                    ArrayPool<byte>.Shared.Return(responseBuffer);
+                                    responseBuffer = tcpBuffer;
+                                    return (responseBuffer, tcpLength);
+                                }
+                                catch
+                                {
+                                    ArrayPool<byte>.Shared.Return(tcpBuffer);
+                                    throw;
+                                }
+                            }
+                            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                            {
+                                throw;
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                lastException = new TimeoutException("DNS TCP query timed out.");
+                                continue;
+                            }
+                            catch (Exception ex)
+                            {
+                                lastException = ex;
+                                continue;
+                            }
+                        }
+
+                        return (responseBuffer, responseLength);
                     }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
                     {
@@ -316,6 +360,8 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         {
             ArrayPool<byte>.Shared.Return(queryBytes);
         }
+
+        ArrayPool<byte>.Shared.Return(responseBuffer);
 
         if (lastException is TimeoutException)
         {
@@ -341,6 +387,67 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         SocketReceiveFromResult result = await socket.ReceiveFromAsync(
             responseBuffer, SocketFlags.None, server, timeoutCts.Token);
         return result.ReceivedBytes;
+    }
+
+    /// <summary>
+    /// Sends a DNS query over TCP (RFC 1035 §4.2.2). TCP messages are prefixed
+    /// with a 2-byte big-endian length field. Returns the number of response bytes
+    /// written into <paramref name="responseBuffer"/> (excluding the length prefix).
+    /// </summary>
+    private async Task<int> SendTcpQueryAsync(
+        ReadOnlyMemory<byte> query, IPEndPoint server,
+        byte[] responseBuffer, CancellationToken ct)
+    {
+        using Socket socket = new Socket(server.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        using CancellationTokenSource timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(_options.Timeout);
+
+        await socket.ConnectAsync(server, timeoutCts.Token);
+
+        // Send: 2-byte length prefix + query
+        byte[] sendBuffer = ArrayPool<byte>.Shared.Rent(2 + query.Length);
+        try
+        {
+            BinaryPrimitives.WriteUInt16BigEndian(sendBuffer, (ushort)query.Length);
+            query.Span.CopyTo(sendBuffer.AsSpan(2));
+            await socket.SendAsync(sendBuffer.AsMemory(0, 2 + query.Length), SocketFlags.None, timeoutCts.Token);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(sendBuffer);
+        }
+
+        // Receive: 2-byte length prefix
+        byte[] lengthBuf = new byte[2];
+        await ReceiveExactAsync(socket, lengthBuf, timeoutCts.Token);
+        int responseLength = BinaryPrimitives.ReadUInt16BigEndian(lengthBuf);
+
+        if (responseLength > responseBuffer.Length)
+        {
+            throw new InvalidDataException($"TCP DNS response length {responseLength} exceeds buffer size {responseBuffer.Length}.");
+        }
+
+        // Receive: response body
+        await ReceiveExactAsync(socket, responseBuffer.AsMemory(0, responseLength), timeoutCts.Token);
+        return responseLength;
+    }
+
+    /// <summary>
+    /// Reads exactly <paramref name="buffer"/>.Length bytes from the socket.
+    /// TCP may deliver data in multiple segments; this loops until all bytes are received.
+    /// </summary>
+    private static async Task ReceiveExactAsync(Socket socket, Memory<byte> buffer, CancellationToken ct)
+    {
+        int totalReceived = 0;
+        while (totalReceived < buffer.Length)
+        {
+            int received = await socket.ReceiveAsync(buffer[totalReceived..], SocketFlags.None, ct);
+            if (received == 0)
+            {
+                throw new InvalidDataException("TCP connection closed before full DNS response was received.");
+            }
+            totalReceived += received;
+        }
     }
 
     private IReadOnlyList<IPEndPoint> GetServers()

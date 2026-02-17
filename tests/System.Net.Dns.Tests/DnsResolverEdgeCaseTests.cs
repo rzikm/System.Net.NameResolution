@@ -169,7 +169,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
     public async Task Retry_EventualSuccess()
     {
         int callCount = 0;
-        _primary.AddResponse("retry.test", DnsRecordType.A, (queryId, qName) =>
+        _primary.AddResponse("retry.test", DnsRecordType.A, (queryId, qName, _) =>
         {
             callCount++;
             if (callCount < 3)
@@ -249,7 +249,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
     public async Task Retry_MalformedThenSuccess()
     {
         int callCount = 0;
-        _primary.AddResponse("malformed-retry.test", DnsRecordType.A, (queryId, qName) =>
+        _primary.AddResponse("malformed-retry.test", DnsRecordType.A, (queryId, qName, _) =>
         {
             callCount++;
             if (callCount < 2)
@@ -271,5 +271,26 @@ public class DnsResolverRetryTests : IAsyncLifetime
         Assert.Single(result.Records);
         Assert.Equal("10.0.0.5", result.Records[0].Address.ToString());
         Assert.Equal(2, callCount);
+    }
+
+    [Fact]
+    public async Task TcpFallback_WhenTruncated_ResolvesOverTcp()
+    {
+        await using LoopbackDnsServer server = LoopbackDnsServer.Start();
+        server.AddTruncatedARecord("tcpfallback.test", IPAddress.Parse("10.0.0.42"));
+
+        using DnsResolver resolver = new DnsResolver(new DnsResolverOptions
+        {
+            Servers = [server.EndPoint],
+            Timeout = TimeSpan.FromSeconds(5),
+        });
+
+        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync(
+            "tcpfallback.test", AddressFamily.InterNetwork);
+
+        Assert.Equal(DnsResponseCode.NoError, result.ResponseCode);
+        Assert.Single(result.Records);
+        Assert.Equal(IPAddress.Parse("10.0.0.42"), result.Records[0].Address);
+        Assert.True(server.TcpRequestCount > 0, "Expected at least one TCP request");
     }
 }

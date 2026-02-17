@@ -11,8 +11,10 @@ namespace System.Net.Dns.Tests;
 internal sealed class LoopbackDnsServer : IAsyncDisposable
 {
     private readonly UdpClient _udp;
+    private readonly TcpListener _tcp;
     private readonly CancellationTokenSource _cts = new();
-    private readonly Task _listenTask;
+    private readonly Task _udpListenTask;
+    private readonly Task _tcpListenTask;
     private readonly Dictionary<(string Name, DnsRecordType Type), ResponseBuilder> _responses = new();
     private int _requestCount;
 
@@ -21,18 +23,26 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// <summary>Number of requests received so far.</summary>
     public int RequestCount => _requestCount;
 
-    private LoopbackDnsServer(UdpClient udp, IPEndPoint endPoint)
+    /// <summary>Number of TCP requests received.</summary>
+    public int TcpRequestCount { get; private set; }
+
+    private LoopbackDnsServer(UdpClient udp, TcpListener tcp, IPEndPoint endPoint)
     {
         _udp = udp;
+        _tcp = tcp;
         EndPoint = endPoint;
-        _listenTask = ListenAsync(_cts.Token);
+        _udpListenTask = ListenUdpAsync(_cts.Token);
+        _tcpListenTask = ListenTcpAsync(_cts.Token);
     }
 
     public static LoopbackDnsServer Start()
     {
         var udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         var ep = (IPEndPoint)udp.Client.LocalEndPoint!;
-        return new LoopbackDnsServer(udp, ep);
+        // Listen on TCP on the same port
+        var tcp = new TcpListener(IPAddress.Loopback, ep.Port);
+        tcp.Start();
+        return new LoopbackDnsServer(udp, tcp, ep);
     }
 
     /// <summary>
@@ -48,7 +58,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// </summary>
     public void AddARecord(string name, IPAddress address, uint ttl = 300)
     {
-        AddResponse(name, DnsRecordType.A, (queryId, qName) =>
+        AddResponse(name, DnsRecordType.A, (queryId, qName, _) =>
             BuildSimpleResponse(queryId, qName, DnsRecordType.A, address.GetAddressBytes(), ttl));
     }
 
@@ -57,7 +67,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// </summary>
     public void AddAAAARecord(string name, IPAddress address, uint ttl = 300)
     {
-        AddResponse(name, DnsRecordType.AAAA, (queryId, qName) =>
+        AddResponse(name, DnsRecordType.AAAA, (queryId, qName, _) =>
             BuildSimpleResponse(queryId, qName, DnsRecordType.AAAA, address.GetAddressBytes(), ttl));
     }
 
@@ -66,7 +76,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// </summary>
     public void AddNxDomain(string name, DnsRecordType type)
     {
-        AddResponse(name, type, (queryId, qName) =>
+        AddResponse(name, type, (queryId, qName, _) =>
             BuildErrorResponse(queryId, qName, type, DnsResponseCode.NameError));
     }
 
@@ -75,7 +85,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// </summary>
     public void AddCNameAndARecord(string name, string cname, IPAddress address, uint ttl = 300)
     {
-        AddResponse(name, DnsRecordType.A, (queryId, qName) =>
+        AddResponse(name, DnsRecordType.A, (queryId, qName, _) =>
             BuildCNameAndAResponse(queryId, qName, cname, address, ttl));
     }
 
@@ -84,7 +94,19 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// </summary>
     public void AddDrop(string name, DnsRecordType type)
     {
-        AddResponse(name, type, (_, _) => []);
+        AddResponse(name, type, (_, _, _) => []);
+    }
+
+    /// <summary>
+    /// Adds a truncated A record response (TC bit set, no answer records).
+    /// The resolver should retry over TCP, where the full response is returned.
+    /// </summary>
+    public void AddTruncatedARecord(string name, IPAddress address, uint ttl = 300)
+    {
+        AddResponse(name, DnsRecordType.A, (queryId, qName, isTcp) =>
+            isTcp
+                ? BuildSimpleResponse(queryId, qName, DnsRecordType.A, address.GetAddressBytes(), ttl)
+                : BuildTruncatedResponse(queryId, qName, DnsRecordType.A, address.GetAddressBytes(), ttl));
     }
 
     /// <summary>
@@ -93,7 +115,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// </summary>
     public void AddRawResponse(string name, DnsRecordType type, Func<ushort, byte[]> rawFactory)
     {
-        AddResponse(name, type, (queryId, _) => rawFactory(queryId));
+        AddResponse(name, type, (queryId, _, _) => rawFactory(queryId));
     }
 
     /// <summary>
@@ -101,7 +123,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// </summary>
     public void AddServerFailure(string name, DnsRecordType type)
     {
-        AddResponse(name, type, (queryId, qName) =>
+        AddResponse(name, type, (queryId, qName, _) =>
             BuildErrorResponse(queryId, qName, type, DnsResponseCode.ServerFailure));
     }
 
@@ -110,7 +132,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// </summary>
     public void AddNoData(string name, DnsRecordType type, string soaName = "test", uint soaMinTtl = 60)
     {
-        AddResponse(name, type, (queryId, qName) =>
+        AddResponse(name, type, (queryId, qName, _) =>
             BuildNoDataResponse(queryId, qName, type, soaName, soaMinTtl));
     }
 
@@ -119,7 +141,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// </summary>
     public void AddNxDomainWithSoa(string name, DnsRecordType type, string soaName = "test", uint soaMinTtl = 60)
     {
-        AddResponse(name, type, (queryId, qName) =>
+        AddResponse(name, type, (queryId, qName, _) =>
             BuildNxDomainWithSoaResponse(queryId, qName, type, soaName, soaMinTtl));
     }
 
@@ -128,7 +150,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// </summary>
     public void AddSrvRecords(string name, (string Target, ushort Port, ushort Priority, ushort Weight, uint Ttl, IPAddress[]? Addresses)[] entries)
     {
-        AddResponse(name, DnsRecordType.SRV, (queryId, qName) =>
+        AddResponse(name, DnsRecordType.SRV, (queryId, qName, _) =>
             BuildSrvResponse(queryId, qName, entries));
     }
 
@@ -206,9 +228,9 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     /// <summary>
     /// Convenience: adds a custom response builder for full control.
     /// </summary>
-    public delegate byte[] ResponseBuilder(ushort queryId, byte[] questionName);
+    public delegate byte[] ResponseBuilder(ushort queryId, byte[] questionName, bool isTcp);
 
-    private async Task ListenAsync(CancellationToken ct)
+    private async Task ListenUdpAsync(CancellationToken ct)
     {
         try
         {
@@ -221,14 +243,84 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
 
                 byte[] response = ProcessQuery(query);
                 if (response.Length > 0)
+                {
                     await _udp.SendAsync(response, remote, ct);
+                }
             }
         }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
     }
 
-    private byte[] ProcessQuery(byte[] query)
+    private async Task ListenTcpAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                TcpClient client = await _tcp.AcceptTcpClientAsync(ct);
+                // Handle each client in a fire-and-forget task
+                _ = HandleTcpClientAsync(client, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+    }
+
+    private async Task HandleTcpClientAsync(TcpClient client, CancellationToken ct)
+    {
+        try
+        {
+            using (client)
+            {
+                NetworkStream stream = client.GetStream();
+
+                // Read 2-byte length prefix
+                byte[] lengthBuf = new byte[2];
+                int read = 0;
+                while (read < 2)
+                {
+                    int n = await stream.ReadAsync(lengthBuf.AsMemory(read, 2 - read), ct);
+                    if (n == 0)
+                    {
+                        return;
+                    }
+                    read += n;
+                }
+
+                int queryLength = BinaryPrimitives.ReadUInt16BigEndian(lengthBuf);
+                byte[] query = new byte[queryLength];
+                read = 0;
+                while (read < queryLength)
+                {
+                    int n = await stream.ReadAsync(query.AsMemory(read, queryLength - read), ct);
+                    if (n == 0)
+                    {
+                        return;
+                    }
+                    read += n;
+                }
+
+                Interlocked.Increment(ref _requestCount);
+                TcpRequestCount++;
+
+                byte[] response = ProcessQuery(query, isTcp: true);
+                if (response.Length > 0)
+                {
+                    // Write 2-byte length prefix + response
+                    byte[] responseLengthBuf = new byte[2];
+                    BinaryPrimitives.WriteUInt16BigEndian(responseLengthBuf, (ushort)response.Length);
+                    await stream.WriteAsync(responseLengthBuf, ct);
+                    await stream.WriteAsync(response, ct);
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (IOException) { }
+    }
+
+    private byte[] ProcessQuery(byte[] query, bool isTcp = false)
     {
         if (query.Length < 12)
             return [];
@@ -264,7 +356,7 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         string nameStr = encodedName.ToString();
 
         if (_responses.TryGetValue((nameStr.ToLowerInvariant(), qType), out var builder))
-            return builder(queryId, questionName);
+            return builder(queryId, questionName, isTcp);
 
         // Default: NXDOMAIN
         return BuildErrorResponse(queryId, questionName, qType, DnsResponseCode.NameError);
@@ -336,6 +428,26 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
         WriteUInt32BE(ms, ttl);
         WriteUInt16BE(ms, (ushort)addrBytes.Length);
         ms.Write(addrBytes);
+
+        return ms.ToArray();
+    }
+
+    internal static byte[] BuildTruncatedResponse(ushort queryId, byte[] questionName,
+        DnsRecordType type, byte[] rdata, uint ttl)
+    {
+        using MemoryStream ms = new MemoryStream();
+        // Header: QR=1, TC=1, RD=1, RA=1 => 0x8380
+        WriteUInt16BE(ms, queryId);
+        WriteUInt16BE(ms, 0x8380);
+        WriteUInt16BE(ms, 1); // QDCOUNT
+        WriteUInt16BE(ms, 0); // ANCOUNT (truncated, no answers)
+        WriteUInt16BE(ms, 0); // NSCOUNT
+        WriteUInt16BE(ms, 0); // ARCOUNT
+
+        // Question echo
+        ms.Write(questionName);
+        WriteUInt16BE(ms, (ushort)type);
+        WriteUInt16BE(ms, 1); // CLASS=IN
 
         return ms.ToArray();
     }
@@ -433,7 +545,9 @@ internal sealed class LoopbackDnsServer : IAsyncDisposable
     {
         _cts.Cancel();
         _udp.Dispose();
-        try { await _listenTask; } catch { }
+        _tcp.Stop();
+        try { await _udpListenTask; } catch { }
+        try { await _tcpListenTask; } catch { }
         _cts.Dispose();
     }
 }
