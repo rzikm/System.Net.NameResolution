@@ -377,7 +377,7 @@ public readonly ref struct DnsEncodedName
         {
             // Need to compute actual Unicode length
             // TODO: Switch to span-based IdnMapping.TryGetUnicode when available (.NET 11+)
-            Span<char> chars = length <= 256 ? stackalloc char[length] : new char[length];
+            Span<char> chars = length <= 256 ? stackalloc char[256] : new char[length];
             TryDecodeAscii(chars, out int asciiWritten);
             try
             {

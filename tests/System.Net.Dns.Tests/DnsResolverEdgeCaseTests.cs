@@ -153,6 +153,41 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         serverCanContinue.Set();
     }
 
+    [Fact]
+    public async Task TimeoutDuringTcpFallback_ThrowsTimeoutException()
+    {
+        // Server returns TC=1 on UDP. On TCP, the server accepts but never
+        // sends a response, so the resolver's internal timeout fires.
+        using SemaphoreSlim tcpReceived = new(0, 1);
+        using ManualResetEventSlim serverCanContinue = new(false);
+
+        await using LoopbackDnsServer server = LoopbackDnsServer.Start();
+        server.AddResponse("tcp-timeout.test", DnsRecordType.A, (queryId, qName, isTcp) =>
+        {
+            if (isTcp)
+            {
+                tcpReceived.Release();
+                // Block until test finishes — simulates an unresponsive TCP server
+                serverCanContinue.Wait(TimeSpan.FromSeconds(10));
+                return LoopbackDnsServer.BuildSimpleResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+            }
+            return LoopbackDnsServer.BuildTruncatedResponse(queryId, qName, DnsRecordType.A, [10, 0, 0, 1], 60);
+        });
+
+        using DnsResolver resolver = new DnsResolver(new DnsResolverOptions
+        {
+            Servers = [server.EndPoint],
+            Timeout = TimeSpan.FromMilliseconds(200),
+            MaxRetries = 0,
+        });
+
+        await Assert.ThrowsAsync<TimeoutException>(
+            () => resolver.ResolveAddressesAsync("tcp-timeout.test", AddressFamily.InterNetwork));
+
+        // Unblock the server handler so dispose completes quickly
+        serverCanContinue.Set();
+    }
+
     // --- CNAME following ---
 
     [Fact]
