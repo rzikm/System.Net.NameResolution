@@ -753,3 +753,23 @@ EDNS0 (RFC 6891) extends DNS via a pseudo-record (OPT, type 41) placed in the ad
 - **Reader**: OPT records are already parseable as regular `DnsRecord`s, but their fields are repurposed (Class = UDP payload size, TTL = extended RCODE + version + flags). A `TryParseOptRecord` extension method would reinterpret these correctly.
 - **Extended RCODE**: The response code is split across the header (lower 4 bits) and the OPT record's TTL field (upper 8 bits). The OPT accessor should expose the full 12-bit combined RCODE.
 - **Fallback**: Some middleboxes drop EDNS0 queries. A robust resolver should retry without EDNS0 on timeout.
+
+## Internationalized Domain Names (IDN)
+
+DNS wire format (RFC 1035) is limited to ASCII. Internationalized domain names (e.g., `münchen.de`, `例え.jp`) are supported via the IDNA 2008 standard (RFC 5891), which encodes Unicode labels using Punycode with the `xn--` ASCII-Compatible Encoding (ACE) prefix. For example, `münchen.de` becomes `xn--mnchen-3ya.de` on the wire.
+
+### Approach
+
+IDN conversion is handled transparently by `DnsEncodedName` using `System.Globalization.IdnMapping`:
+
+- **Encoding** (`TryEncode`): When the input name contains non-ASCII characters, the entire name is converted to ACE form via `IdnMapping.GetAscii()` before wire encoding. Invalid Unicode input (e.g., lone surrogates) results in `OperationStatus.InvalidData`.
+- **Decoding** (`TryDecode`, `ToString`): When the wire-format name contains ACE-encoded labels (detected by the `xn--` prefix), the decoded ASCII string is passed through `IdnMapping.GetUnicode()` to recover the original Unicode form. If IDN conversion fails (e.g., malformed ACE), the raw ASCII form is preserved.
+- **Comparison** (`Equals`): When comparing against a Unicode string, the input is first converted to ACE form before case-insensitive ASCII comparison with the wire-format labels.
+
+### Design Decisions
+
+1. **Whole-name conversion**: `IdnMapping.GetAscii()` operates on the full dotted name, not individual labels. This simplifies the implementation and ensures consistent IDNA validation across all labels.
+2. **Transparent round-trip**: `TryEncode("münchen.de", ...)` followed by `ToString()` returns `"münchen.de"` — the Unicode form is preserved through the ACE wire encoding.
+3. **ACE pass-through**: Already-ACE names (e.g., `xn--mnchen-3ya.de`) are accepted by `TryEncode` and decoded to Unicode by `ToString()`. There is no double-encoding.
+4. **Graceful fallback**: If `IdnMapping.GetUnicode()` fails during decoding, the raw ACE form is returned rather than throwing an exception.
+5. **STD3 rules**: `IdnMapping` is configured with `UseStd3AsciiRules = true` to enforce hostname validity (no underscores, spaces, etc. in non-IDN labels).

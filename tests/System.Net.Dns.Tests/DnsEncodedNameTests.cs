@@ -449,11 +449,13 @@ public class DnsEncodedNameTests
     }
 
     [Fact]
-    public void TryEncode_NonAsciiCharacter_ReturnsInvalidData()
+    public void TryEncode_NonAsciiCharacter_ConvertedToAce()
     {
         Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
-        OperationStatus status = DnsEncodedName.TryEncode("café.test", buffer, out _, out _);
-        Assert.Equal(OperationStatus.InvalidData, status);
+        OperationStatus status = DnsEncodedName.TryEncode("café.test", buffer, out DnsEncodedName name, out _);
+        Assert.Equal(OperationStatus.Done, status);
+        // café → xn--caf-dma in ACE
+        Assert.True(name.Equals("xn--caf-dma.test"));
     }
 
     [Fact]
@@ -482,5 +484,112 @@ public class DnsEncodedNameTests
         DnsEncodedName name = new(buffer, 5);
         // Wire length of a pointer is 2 bytes
         Assert.Equal(2, name.GetWireLength());
+    }
+
+    // === IDN (Internationalized Domain Name) Tests ===
+
+    [Theory]
+    [InlineData("münchen.de", "xn--mnchen-3ya.de")]
+    [InlineData("例え.jp", "xn--r8jz45g.jp")]
+    [InlineData("café.test", "xn--caf-dma.test")]
+    [InlineData("домен.рф", "xn--d1acufc.xn--p1ai")]
+    public void TryEncode_IdnName_ProducesAceWireFormat(string unicode, string expectedAce)
+    {
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        OperationStatus status = DnsEncodedName.TryEncode(unicode, buffer, out DnsEncodedName name, out _);
+        Assert.Equal(OperationStatus.Done, status);
+        Assert.True(name.Equals(expectedAce));
+    }
+
+    [Theory]
+    [InlineData("münchen.de")]
+    [InlineData("例え.jp")]
+    [InlineData("café.test")]
+    public void TryEncode_IdnName_RoundTripsViaToString(string unicode)
+    {
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        OperationStatus status = DnsEncodedName.TryEncode(unicode, buffer, out DnsEncodedName name, out _);
+        Assert.Equal(OperationStatus.Done, status);
+        Assert.Equal(unicode, name.ToString());
+    }
+
+    [Theory]
+    [InlineData("münchen.de")]
+    [InlineData("café.test")]
+    public void TryDecode_IdnName_ProducesUnicode(string unicode)
+    {
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode(unicode, buffer, out DnsEncodedName name, out _);
+
+        Span<char> decoded = stackalloc char[256];
+        Assert.True(name.TryDecode(decoded, out int written));
+        Assert.Equal(unicode, new string(decoded[..written]));
+    }
+
+    [Theory]
+    [InlineData("münchen.de")]
+    [InlineData("café.test")]
+    public void Equals_IdnName_MatchesUnicode(string unicode)
+    {
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode(unicode, buffer, out DnsEncodedName name, out _);
+        Assert.True(name.Equals(unicode));
+    }
+
+    [Fact]
+    public void Equals_IdnName_CaseInsensitive()
+    {
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode("münchen.de", buffer, out DnsEncodedName name, out _);
+        // ACE form comparison is case-insensitive
+        Assert.True(name.Equals("XN--MNCHEN-3YA.DE"));
+    }
+
+    [Fact]
+    public void TryEncode_MixedAsciiAndIdn_Succeeds()
+    {
+        // "www" is ASCII, "münchen" is IDN, "de" is ASCII
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        OperationStatus status = DnsEncodedName.TryEncode("www.münchen.de", buffer, out DnsEncodedName name, out _);
+        Assert.Equal(OperationStatus.Done, status);
+        Assert.Equal("www.münchen.de", name.ToString());
+        Assert.True(name.Equals("www.xn--mnchen-3ya.de"));
+    }
+
+    [Fact]
+    public void TryEncode_AceNamePassesThrough()
+    {
+        // Already-ACE input should pass through unchanged
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        OperationStatus status = DnsEncodedName.TryEncode("xn--mnchen-3ya.de", buffer, out DnsEncodedName name, out _);
+        Assert.Equal(OperationStatus.Done, status);
+        Assert.Equal("münchen.de", name.ToString());
+    }
+
+    [Fact]
+    public void GetFormattedLength_IdnName_ReturnsUnicodeLength()
+    {
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode("münchen.de", buffer, out DnsEncodedName name, out _);
+        // "münchen.de" is 10 chars, not "xn--mnchen-3ya.de" (18 chars)
+        Assert.Equal("münchen.de".Length, name.GetFormattedLength());
+    }
+
+    [Fact]
+    public void TryEncode_IdnWithTrailingDot_Succeeds()
+    {
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        OperationStatus status = DnsEncodedName.TryEncode("münchen.de.", buffer, out DnsEncodedName name, out _);
+        Assert.Equal(OperationStatus.Done, status);
+        Assert.Equal("münchen.de", name.ToString());
+    }
+
+    [Fact]
+    public void Equals_InvalidUnicode_ReturnsFalse()
+    {
+        Span<byte> buffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode("example.com", buffer, out DnsEncodedName name, out _);
+        // Lone surrogate — invalid Unicode, can't convert to ACE
+        Assert.False(name.Equals("\uD800.com"));
     }
 }

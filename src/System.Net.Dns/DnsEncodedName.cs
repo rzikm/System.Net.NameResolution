@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Globalization;
 
 namespace System.Net;
 
@@ -97,6 +98,22 @@ public readonly ref struct DnsEncodedName
             return OperationStatus.Done;
         }
 
+        // If the name contains non-ASCII characters, convert to ACE (Punycode) form
+        // per RFC 5891 (IDNA 2008) before wire encoding.
+        string? aceName = null;
+        if (ContainsNonAscii(name))
+        {
+            try
+            {
+                aceName = s_idnMapping.GetAscii(name.ToString());
+            }
+            catch (ArgumentException)
+            {
+                return OperationStatus.InvalidData;
+            }
+            name = aceName;
+        }
+
         // Strip trailing dot if present (FQDN notation),
         // but only if it doesn't create an empty label (e.g., "vp.." should remain invalid)
         if (name[^1] == '.' && (name.Length < 2 || name[^2] != '.'))
@@ -139,7 +156,7 @@ public readonly ref struct DnsEncodedName
             destination[pos] = (byte)labelLen;
             pos++;
 
-            // Write label bytes (ASCII only)
+            // Write label bytes (ASCII only after IDN conversion)
             for (int i = 0; i < labelLen; i++)
             {
                 char c = name[nameIdx + i];
@@ -147,8 +164,6 @@ public readonly ref struct DnsEncodedName
                 {
                     return OperationStatus.InvalidData;
                 }
-                // Allow letters, digits, hyphens per RFC 1035 §2.3.1
-                // We're lenient: allow any ASCII printable except '.'
                 destination[pos + i] = (byte)c;
             }
             pos += labelLen;
@@ -170,11 +185,41 @@ public readonly ref struct DnsEncodedName
         return OperationStatus.Done;
     }
 
+    private static readonly IdnMapping s_idnMapping = new IdnMapping { AllowUnassigned = false, UseStd3AsciiRules = true };
+
+    private static bool ContainsNonAscii(ReadOnlySpan<char> text)
+    {
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] > 127)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// <summary>
     /// Compares this name to a dotted string representation. Case-insensitive.
+    /// Non-ASCII (Unicode) names are converted to ACE form before comparison.
     /// </summary>
     public bool Equals(ReadOnlySpan<char> name)
     {
+        // If the name contains non-ASCII characters, convert to ACE for comparison
+        string? aceName = null;
+        if (ContainsNonAscii(name))
+        {
+            try
+            {
+                aceName = s_idnMapping.GetAscii(name.ToString());
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+            name = aceName;
+        }
+
         // Strip trailing dot from the comparison name
         if (name.Length > 0 && name[^1] == '.')
         {
@@ -224,8 +269,180 @@ public readonly ref struct DnsEncodedName
 
     /// <summary>
     /// Decodes the domain name into the destination buffer as a dotted string.
+    /// ACE-encoded labels (starting with "xn--") are converted back to Unicode.
     /// </summary>
     public bool TryDecode(Span<char> destination, out int charsWritten)
+    {
+        charsWritten = 0;
+        DnsLabelEnumerator enumerator = EnumerateLabels();
+        bool first = true;
+        bool hasAce = false;
+
+        while (enumerator.MoveNext())
+        {
+            ReadOnlySpan<byte> label = enumerator.Current;
+
+            if (!first)
+            {
+                if (charsWritten >= destination.Length)
+                {
+                    return false;
+                }
+                destination[charsWritten] = '.';
+                charsWritten++;
+            }
+            first = false;
+
+            if (charsWritten + label.Length > destination.Length)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < label.Length; i++)
+            {
+                destination[charsWritten + i] = (char)label[i];
+            }
+
+            if (!hasAce && IsAceLabel(label))
+            {
+                hasAce = true;
+            }
+
+            charsWritten += label.Length;
+        }
+
+        // If any label was ACE-encoded, try to convert the whole name to Unicode
+        if (hasAce)
+        {
+            try
+            {
+                string unicode = s_idnMapping.GetUnicode(new string(destination[..charsWritten]));
+                if (unicode.Length <= destination.Length)
+                {
+                    unicode.AsSpan().CopyTo(destination);
+                    charsWritten = unicode.Length;
+                }
+                // If the Unicode form doesn't fit, keep the ACE form
+            }
+            catch (ArgumentException)
+            {
+                // If IDN conversion fails, keep the raw ACE form
+            }
+        }
+
+        // Root name produces empty string — that's fine
+        return true;
+    }
+
+    private static bool IsAceLabel(ReadOnlySpan<byte> label)
+    {
+        return label.Length >= 4 &&
+               (label[0] == (byte)'x' || label[0] == (byte)'X') &&
+               (label[1] == (byte)'n' || label[1] == (byte)'N') &&
+               label[2] == (byte)'-' &&
+               label[3] == (byte)'-';
+    }
+
+    /// <summary>
+    /// Returns the character count of the decoded dotted string representation.
+    /// For names containing ACE-encoded labels, this returns the length of the Unicode form.
+    /// </summary>
+    public int GetFormattedLength()
+    {
+        int length = 0;
+        DnsLabelEnumerator enumerator = EnumerateLabels();
+        bool first = true;
+        bool hasAce = false;
+
+        while (enumerator.MoveNext())
+        {
+            if (!first)
+            {
+                length++; // dot separator
+            }
+            first = false;
+
+            if (!hasAce && IsAceLabel(enumerator.Current))
+            {
+                hasAce = true;
+            }
+
+            length += enumerator.Current.Length;
+        }
+
+        if (hasAce)
+        {
+            // Need to compute actual Unicode length
+            Span<char> chars = length <= 256 ? stackalloc char[length] : new char[length];
+            TryDecodeAscii(chars, out int asciiWritten);
+            try
+            {
+                string unicode = s_idnMapping.GetUnicode(new string(chars[..asciiWritten]));
+                return unicode.Length;
+            }
+            catch (ArgumentException)
+            {
+                // Fall back to ACE length
+            }
+        }
+
+        return length;
+    }
+
+    /// <summary>
+    /// Enumerates the individual labels of this domain name.
+    /// Follows compression pointers transparently.
+    /// </summary>
+    public DnsLabelEnumerator EnumerateLabels() => new DnsLabelEnumerator(_buffer, _offset);
+
+    public override string ToString()
+    {
+        // First get the ASCII form
+        int asciiLen = GetAsciiFormattedLength();
+        if (asciiLen == 0)
+        {
+            return ".";
+        }
+        Span<char> chars = asciiLen <= 256 ? stackalloc char[asciiLen] : new char[asciiLen];
+        TryDecodeAscii(chars, out int written);
+
+        // Try to convert ACE labels to Unicode
+        string ascii = new string(chars[..written]);
+        try
+        {
+            return s_idnMapping.GetUnicode(ascii);
+        }
+        catch (ArgumentException)
+        {
+            return ascii;
+        }
+    }
+
+    /// <summary>
+    /// Gets the ASCII (non-IDN-decoded) formatted length.
+    /// </summary>
+    private int GetAsciiFormattedLength()
+    {
+        int length = 0;
+        DnsLabelEnumerator enumerator = EnumerateLabels();
+        bool first = true;
+
+        while (enumerator.MoveNext())
+        {
+            if (!first)
+            {
+                length++; // dot separator
+            }
+            first = false;
+            length += enumerator.Current.Length;
+        }
+        return length;
+    }
+
+    /// <summary>
+    /// Decodes the domain name as raw ASCII without IDN conversion.
+    /// </summary>
+    private bool TryDecodeAscii(Span<char> destination, out int charsWritten)
     {
         charsWritten = 0;
         DnsLabelEnumerator enumerator = EnumerateLabels();
@@ -258,47 +475,7 @@ public readonly ref struct DnsEncodedName
             charsWritten += label.Length;
         }
 
-        // Root name produces empty string — that's fine
         return true;
-    }
-
-    /// <summary>
-    /// Returns the character count of the decoded dotted string representation.
-    /// </summary>
-    public int GetFormattedLength()
-    {
-        int length = 0;
-        DnsLabelEnumerator enumerator = EnumerateLabels();
-        bool first = true;
-
-        while (enumerator.MoveNext())
-        {
-            if (!first)
-            {
-                length++; // dot separator
-            }
-            first = false;
-            length += enumerator.Current.Length;
-        }
-        return length;
-    }
-
-    /// <summary>
-    /// Enumerates the individual labels of this domain name.
-    /// Follows compression pointers transparently.
-    /// </summary>
-    public DnsLabelEnumerator EnumerateLabels() => new DnsLabelEnumerator(_buffer, _offset);
-
-    public override string ToString()
-    {
-        int len = GetFormattedLength();
-        if (len == 0)
-        {
-            return ".";
-        }
-        Span<char> chars = len <= 256 ? stackalloc char[len] : new char[len];
-        TryDecode(chars, out _);
-        return new string(chars);
     }
 
     /// <summary>
