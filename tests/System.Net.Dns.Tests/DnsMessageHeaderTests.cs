@@ -71,11 +71,12 @@ public class DnsMessageHeaderTests
     [Fact]
     public void RoundTrip_AllResponseCodes()
     {
+        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
+
         foreach (DnsResponseCode rcode in Enum.GetValues<DnsResponseCode>())
         {
             var original = new DnsMessageHeader { IsResponse = true, ResponseCode = rcode };
 
-            Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
             Assert.True(original.TryWrite(buffer));
             Assert.True(DnsMessageHeader.TryRead(buffer, out var parsed));
             Assert.Equal(rcode, parsed.ResponseCode);
@@ -85,11 +86,12 @@ public class DnsMessageHeaderTests
     [Fact]
     public void RoundTrip_OpCodes()
     {
+        Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
+
         foreach (DnsOpCode opcode in Enum.GetValues<DnsOpCode>())
         {
             var original = new DnsMessageHeader { OpCode = opcode };
 
-            Span<byte> buffer = stackalloc byte[DnsMessageHeader.Size];
             Assert.True(original.TryWrite(buffer));
             Assert.True(DnsMessageHeader.TryRead(buffer, out var parsed));
             Assert.Equal(opcode, parsed.OpCode);

@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.IO;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -230,37 +231,22 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     private async Task<(byte[] Buffer, int Length)> SendQueryAsync(
         string name, DnsRecordType type, CancellationToken ct)
     {
-        // Build query message on the stack
-        Span<byte> nameBuf = stackalloc byte[DnsEncodedName.MaxEncodedLength];
-        OperationStatus status = DnsEncodedName.TryEncode(name, nameBuf, out DnsEncodedName encodedName, out _);
-        if (status != OperationStatus.Done)
-        {
-            throw new ArgumentException($"Invalid DNS name: '{name}'", nameof(name));
-        }
-
-        Span<byte> querySpan = stackalloc byte[MaxUdpResponseSize];
-        DnsMessageWriter writer = new DnsMessageWriter(querySpan);
-        ushort queryId = (ushort)RandomNumberGenerator.GetInt32(ushort.MaxValue + 1);
-        writer.TryWriteHeader(new DnsMessageHeader { Id = queryId, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 });
-        writer.TryWriteQuestion(encodedName, type);
-
-        // Copy to a heap buffer for async send (can't use stackalloc across await)
-        byte[] queryBytes = ArrayPool<byte>.Shared.Rent(writer.BytesWritten);
-        querySpan[..writer.BytesWritten].CopyTo(queryBytes);
-        int queryLength = writer.BytesWritten;
-
         IReadOnlyList<IPEndPoint> servers = GetServers();
-        if (servers.Count == 0)
-        {
-            ArrayPool<byte>.Shared.Return(queryBytes);
-            throw new InvalidOperationException("No DNS servers configured.");
-        }
+        Debug.Assert(servers.Count > 0, "GetServers should return at least one server.");
 
-        byte[] responseBuffer = ArrayPool<byte>.Shared.Rent(MaxUdpResponseSize);
         Exception? lastException = null;
 
+        // ownership of the buffer is passed to the caller
+        byte[] responseBuffer;
+
+        byte[] queryBytes = ArrayPool<byte>.Shared.Rent(MaxUdpResponseSize);
         try
         {
+            ushort queryId = (ushort)RandomNumberGenerator.GetInt32(ushort.MaxValue + 1);
+            int queryLength = WriteDnsRequestMessage(queryId, name, type, queryBytes);
+
+            responseBuffer = ArrayPool<byte>.Shared.Rent(MaxUdpResponseSize);
+
             foreach (IPEndPoint server in servers)
             {
                 for (int attempt = 0; attempt <= _options.MaxRetries; attempt++)
@@ -370,6 +356,24 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         }
 
         throw new InvalidOperationException("All DNS servers failed.", lastException);
+    }
+
+    private int WriteDnsRequestMessage(ushort queryId, string name, DnsRecordType type, Span<byte> destination)
+    {
+        // Build query message on the stack
+        Span<byte> dnsNameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        OperationStatus status = DnsEncodedName.TryEncode(name, dnsNameBuffer, out DnsEncodedName encodedName, out int nameBytesWritten);
+        if (status == OperationStatus.InvalidData)
+        {
+            throw new ArgumentException($"Invalid DNS name: '{name}'", nameof(name));
+        }
+
+        Debug.Assert(status == OperationStatus.Done);
+
+        DnsMessageWriter writer = new DnsMessageWriter(destination);
+        writer.TryWriteHeader(new DnsMessageHeader { Id = queryId, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 });
+        writer.TryWriteQuestion(encodedName, type);
+        return writer.BytesWritten;
     }
 
     /// <summary>
