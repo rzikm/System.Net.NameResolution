@@ -172,7 +172,7 @@ static class FuzzTargets
                 // Also write the name into a message and read it back
                 Span<byte> msgBuf = stackalloc byte[512];
                 DnsMessageWriter writer = new DnsMessageWriter(msgBuf);
-                writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(0x0001));
+                writer.TryWriteHeader(new DnsMessageHeader { Id = 0x0001, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 });
                 writer.TryWriteQuestion(name, DnsRecordType.A);
 
                 if (writer.BytesWritten >= 12)
@@ -221,14 +221,14 @@ static class FuzzTargets
         {
             Span<byte> writeDest = new byte[size];
             DnsMessageWriter writer = new DnsMessageWriter(writeDest);
-            writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(0x1234));
+            writer.TryWriteHeader(new DnsMessageHeader { Id = 0x1234, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 });
             writer.TryWriteQuestion(encodedName, (DnsRecordType)type);
         }
 
         // Full-size write and read back
         Span<byte> fullDest = new byte[512];
         DnsMessageWriter fullWriter = new DnsMessageWriter(fullDest);
-        if (fullWriter.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(0x5678)) &&
+        if (fullWriter.TryWriteHeader(new DnsMessageHeader { Id = 0x5678, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 }) &&
             fullWriter.TryWriteQuestion(encodedName, (DnsRecordType)type))
         {
             if (DnsMessageReader.TryCreate(fullDest[..fullWriter.BytesWritten], out DnsMessageReader reader))
@@ -268,7 +268,7 @@ static class FuzzTargets
         // Write a query
         Span<byte> msgBuf = stackalloc byte[512];
         DnsMessageWriter writer = new DnsMessageWriter(msgBuf);
-        if (!writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(id)))
+        if (!writer.TryWriteHeader(new DnsMessageHeader { Id = id, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 }))
         {
             return;
         }

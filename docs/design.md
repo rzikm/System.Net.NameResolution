@@ -190,36 +190,22 @@ public enum DnsHeaderFlags : ushort
 
 ### DnsMessageHeader
 
-A readonly struct representing the fixed 12-byte DNS message header. Used by both reader and writer.
+A mutable struct representing the fixed 12-byte DNS message header. Used by both reader and writer. Properties default to zero/false, so callers only need to set the fields relevant to their use case.
 
 ```csharp
 namespace System.Net;
 
-public readonly struct DnsMessageHeader
+public struct DnsMessageHeader
 {
-    // Properties (all read-only)
-    public ushort Id { get; }
-    public bool IsResponse { get; }              // QR bit
-    public DnsOpCode OpCode { get; }
-    public DnsHeaderFlags Flags { get; }
-    public DnsResponseCode ResponseCode { get; } // RCODE
-    public ushort QuestionCount { get; }         // QDCOUNT
-    public ushort AnswerCount { get; }           // ANCOUNT
-    public ushort AuthorityCount { get; }        // NSCOUNT
-    public ushort AdditionalCount { get; }       // ARCOUNT
-
-    // Full constructor
-    public DnsMessageHeader(
-        ushort id, bool isResponse, DnsOpCode opCode,
-        DnsHeaderFlags flags, DnsResponseCode responseCode,
-        ushort questionCount, ushort answerCount,
-        ushort authorityCount, ushort additionalCount);
-
-    // Convenience factory for the common case: standard recursive query
-    public static DnsMessageHeader CreateStandardQuery(
-        ushort id,
-        ushort questionCount = 1,
-        DnsHeaderFlags flags = DnsHeaderFlags.RecursionDesired);
+    public ushort Id { get; set; }
+    public bool IsResponse { get; set; }              // QR bit
+    public DnsOpCode OpCode { get; set; }
+    public DnsHeaderFlags Flags { get; set; }
+    public DnsResponseCode ResponseCode { get; set; } // RCODE
+    public ushort QuestionCount { get; set; }         // QDCOUNT
+    public ushort AnswerCount { get; set; }           // ANCOUNT
+    public ushort AuthorityCount { get; set; }        // NSCOUNT
+    public ushort AdditionalCount { get; set; }       // ARCOUNT
 }
 ```
 
@@ -518,7 +504,7 @@ if (status != OperationStatus.Done) { /* handle invalid name */ }
 Span<byte> buffer = stackalloc byte[512];
 var writer = new DnsMessageWriter(buffer);
 
-var header = DnsMessageHeader.CreateStandardQuery(id: 0x1234);
+var header = new DnsMessageHeader { Id = 0x1234, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
 writer.TryWriteHeader(in header);
 writer.TryWriteQuestion(name, DnsRecordType.A);
 

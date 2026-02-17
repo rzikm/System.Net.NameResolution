@@ -108,7 +108,7 @@ public class DnsRoundTripTests : IAsyncLifetime
 
         Span<byte> queryBuf = stackalloc byte[512];
         var writer = new DnsMessageWriter(queryBuf);
-        writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(id: id));
+        writer.TryWriteHeader(new DnsMessageHeader { Id = id, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 });
         writer.TryWriteQuestion(encodedName, type);
         return queryBuf[..writer.BytesWritten].ToArray();
     }

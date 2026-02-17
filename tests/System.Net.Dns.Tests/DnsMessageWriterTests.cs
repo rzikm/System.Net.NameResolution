@@ -28,7 +28,7 @@ public class DnsMessageWriterTests
         Span<byte> buffer = stackalloc byte[512];
         var writer = new DnsMessageWriter(buffer);
 
-        var header = DnsMessageHeader.CreateStandardQuery(id: 0x1234);
+        var header = new DnsMessageHeader { Id = 0x1234, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Assert.True(writer.TryWriteHeader(in header));
 
         Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
@@ -46,7 +46,7 @@ public class DnsMessageWriterTests
         Span<byte> buffer = stackalloc byte[512];
         var writer = new DnsMessageWriter(buffer);
 
-        var header = DnsMessageHeader.CreateStandardQuery(id: 1, questionCount: 2);
+        var header = new DnsMessageHeader { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 2 };
         Assert.True(writer.TryWriteHeader(in header));
 
         Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
@@ -67,7 +67,7 @@ public class DnsMessageWriterTests
     {
         Span<byte> buffer = stackalloc byte[11]; // 1 short
         var writer = new DnsMessageWriter(buffer);
-        var header = DnsMessageHeader.CreateStandardQuery(id: 1);
+        var header = new DnsMessageHeader { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Assert.False(writer.TryWriteHeader(in header));
         Assert.Equal(0, writer.BytesWritten);
     }
@@ -86,7 +86,7 @@ public class DnsMessageWriterTests
 
         Span<byte> buffer = stackalloc byte[512];
         var writer = new DnsMessageWriter(buffer);
-        var header = DnsMessageHeader.CreateStandardQuery(id: 1);
+        var header = new DnsMessageHeader { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Assert.True(writer.TryWriteHeader(in header));
         Assert.True(writer.TryWriteQuestion(compressedName, DnsRecordType.A));
 
@@ -107,7 +107,7 @@ public class DnsMessageWriterTests
         Span<byte> buffer = stackalloc byte[14]; // header fits (12), question needs more
         var writer = new DnsMessageWriter(buffer);
 
-        var header = DnsMessageHeader.CreateStandardQuery(id: 1);
+        var header = new DnsMessageHeader { Id = 1, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 };
         Assert.True(writer.TryWriteHeader(in header));
 
         Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];

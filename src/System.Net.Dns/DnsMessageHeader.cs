@@ -5,46 +5,17 @@ namespace System.Net;
 /// <summary>
 /// Represents the fixed 12-byte DNS message header (RFC 1035 §4.1.1).
 /// </summary>
-public readonly struct DnsMessageHeader
+public struct DnsMessageHeader
 {
-    public ushort Id { get; }
-    public bool IsResponse { get; }
-    public DnsOpCode OpCode { get; }
-    public DnsHeaderFlags Flags { get; }
-    public DnsResponseCode ResponseCode { get; }
-    public ushort QuestionCount { get; }
-    public ushort AnswerCount { get; }
-    public ushort AuthorityCount { get; }
-    public ushort AdditionalCount { get; }
-
-    public DnsMessageHeader(
-        ushort id, bool isResponse, DnsOpCode opCode,
-        DnsHeaderFlags flags, DnsResponseCode responseCode,
-        ushort questionCount, ushort answerCount,
-        ushort authorityCount, ushort additionalCount)
-    {
-        Id = id;
-        IsResponse = isResponse;
-        OpCode = opCode;
-        Flags = flags;
-        ResponseCode = responseCode;
-        QuestionCount = questionCount;
-        AnswerCount = answerCount;
-        AuthorityCount = authorityCount;
-        AdditionalCount = additionalCount;
-    }
-
-    public static DnsMessageHeader CreateStandardQuery(
-        ushort id,
-        ushort questionCount = 1,
-        DnsHeaderFlags flags = DnsHeaderFlags.RecursionDesired)
-    {
-        return new DnsMessageHeader(
-            id, isResponse: false, DnsOpCode.Query,
-            flags, DnsResponseCode.NoError,
-            questionCount, answerCount: 0,
-            authorityCount: 0, additionalCount: 0);
-    }
+    public ushort Id { get; set; }
+    public bool IsResponse { get; set; }
+    public DnsOpCode OpCode { get; set; }
+    public DnsHeaderFlags Flags { get; set; }
+    public DnsResponseCode ResponseCode { get; set; }
+    public ushort QuestionCount { get; set; }
+    public ushort AnswerCount { get; set; }
+    public ushort AuthorityCount { get; set; }
+    public ushort AdditionalCount { get; set; }
 
     /// <summary>
     /// Size of the DNS header in bytes.
@@ -91,8 +62,18 @@ public readonly struct DnsMessageHeader
         DecodeFlagsWord(flagsWord, out bool isResponse, out DnsOpCode opCode,
             out DnsHeaderFlags flags, out DnsResponseCode responseCode);
 
-        header = new DnsMessageHeader(id, isResponse, opCode, flags, responseCode,
-            qdCount, anCount, nsCount, arCount);
+        header = new DnsMessageHeader
+        {
+            Id = id,
+            IsResponse = isResponse,
+            OpCode = opCode,
+            Flags = flags,
+            ResponseCode = responseCode,
+            QuestionCount = qdCount,
+            AnswerCount = anCount,
+            AuthorityCount = nsCount,
+            AdditionalCount = arCount,
+        };
         return true;
     }
 

@@ -235,7 +235,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         Span<byte> querySpan = stackalloc byte[MaxUdpResponseSize];
         DnsMessageWriter writer = new DnsMessageWriter(querySpan);
         ushort queryId = (ushort)Random.Shared.Next(0, ushort.MaxValue + 1);
-        writer.TryWriteHeader(DnsMessageHeader.CreateStandardQuery(queryId));
+        writer.TryWriteHeader(new DnsMessageHeader { Id = queryId, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 1 });
         writer.TryWriteQuestion(encodedName, type);
 
         // Copy to a heap buffer for async send (can't use stackalloc across await)

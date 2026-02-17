@@ -250,7 +250,7 @@ public class DnsMessageReaderTests
         Span<byte> buffer = stackalloc byte[512];
         var writer = new DnsMessageWriter(buffer);
 
-        var header = DnsMessageHeader.CreateStandardQuery(id: 0xBEEF, questionCount: 2);
+        var header = new DnsMessageHeader { Id = 0xBEEF, Flags = DnsHeaderFlags.RecursionDesired, QuestionCount = 2 };
         writer.TryWriteHeader(in header);
 
         Span<byte> nameBuf = stackalloc byte[DnsEncodedName.MaxEncodedLength];
