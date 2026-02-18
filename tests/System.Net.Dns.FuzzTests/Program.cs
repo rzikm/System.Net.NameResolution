@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Net;
+using System.Text;
 using SharpFuzz;
 
 // Select fuzz target via first argument.
@@ -22,12 +23,15 @@ switch (target)
     case "roundtrip":
         Fuzzer.LibFuzzer.Run(FuzzTargets.RoundTrip);
         break;
+    case "name-roundtrip":
+        Fuzzer.LibFuzzer.Run(FuzzTargets.NameRoundtrip);
+        break;
     case "generate-seeds":
         SeedGenerator.Generate();
         break;
     default:
         Console.Error.WriteLine($"Unknown target: {target}");
-        Console.Error.WriteLine("Available targets: reader, name, writer, roundtrip, generate-seeds");
+        Console.Error.WriteLine("Available targets: reader, name, writer, roundtrip, name-roundtrip, generate-seeds");
         return 1;
 }
 
@@ -116,6 +120,42 @@ static class FuzzTargets
         }
     }
 
+    public static void NameRoundtrip(ReadOnlySpan<byte> data)
+    {
+        // Exercise a write-then-read round-trip for DnsEncodedName.
+        // Input is treated as UTF-8 name string, encoded then parsed back.
+
+        Span<char> chars = stackalloc char[256];
+        if (!Encoding.UTF8.TryGetChars(data, chars, out int charsWritten))
+        {
+            return;
+        }
+        chars = chars[..charsWritten];
+
+        Span<byte> buf = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        if (DnsEncodedName.TryEncode(chars, buf, out DnsEncodedName name, out int bytesWritten) != OperationStatus.Done)
+        {
+            return;
+        }
+
+        Span<char> decodedChars = stackalloc char[1024];
+        if (!name.TryDecode(decodedChars, out int charsDecoded) || charsDecoded == 0)
+        {
+            throw new Exception("Failed to decode encoded name: " + new string(chars));
+        }
+        decodedChars = decodedChars[..charsDecoded];
+
+        if (!name.Equals(chars))
+        {
+            throw new Exception($"Round-trip equality mismatch: wrote '{new string(chars)}', read '{name.ToString()}'");
+        }
+
+        if (!name.Equals(name.ToString()))
+        {
+            throw new Exception($"Round-trip self-equality mismatch: name does not equal its ToString() representation");
+        }
+    }
+
     /// <summary>
     /// Fuzzes DnsEncodedName creation from arbitrary strings via TryCreate,
     /// then exercises all public name methods.
@@ -150,10 +190,7 @@ static class FuzzTargets
         {
             // Exercise TryCreate: treat payload as characters for name creation
             Span<char> chars = stackalloc char[payload.Length];
-            for (int i = 0; i < payload.Length; i++)
-            {
-                chars[i] = (char)payload[i];
-            }
+            Ascii.ToUtf16(payload, chars, out _);
 
             Span<byte> dest = stackalloc byte[DnsEncodedName.MaxEncodedLength];
             OperationStatus status = DnsEncodedName.TryEncode(chars, dest, out DnsEncodedName name, out int written);
@@ -317,6 +354,7 @@ static class SeedGenerator
         GenerateNameSeeds(Path.Combine(corpusDir, "name"));
         GenerateWriterSeeds(Path.Combine(corpusDir, "writer"));
         GenerateRoundTripSeeds(Path.Combine(corpusDir, "roundtrip"));
+        GenerateNameRoundtripSeeds(Path.Combine(corpusDir, "name-roundtrip"));
 
         Console.WriteLine($"Seeds generated in {Path.GetFullPath(corpusDir)}");
     }
@@ -369,6 +407,24 @@ static class SeedGenerator
         seed2[0] = 0xAB; seed2[1] = 0xCD;
         "test"u8.CopyTo(seed2.AsSpan(2));
         WriteFile(dir, "single_label.bin", seed2);
+    }
+
+    private static void GenerateNameRoundtripSeeds(string dir)
+    {
+        string[] names = [
+            "example.com",
+            "www.example.com",
+            "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z",
+            "test",
+            ".",
+            "example.com.",
+            "xn--d1acpjx3f.xn--p1ai", // IDN: пример.рф
+        ];
+
+        foreach (string name in names)
+        {
+            WriteFile(dir, $"{name}.bin", Encoding.UTF8.GetBytes(name));
+        }
     }
 
     private static byte[] BuildResponse(string name, ushort type, byte[] rdata)

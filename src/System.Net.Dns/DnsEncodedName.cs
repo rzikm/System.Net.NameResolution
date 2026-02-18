@@ -239,68 +239,46 @@ public readonly ref struct DnsEncodedName
     public bool TryDecode(Span<char> destination, out int charsWritten)
     {
         charsWritten = 0;
-        DnsLabelEnumerator enumerator = EnumerateLabels();
-        bool first = true;
 
-        while (enumerator.MoveNext())
+        if (!_isAce)
         {
-            ReadOnlySpan<byte> label = enumerator.Current;
-
-            if (!first)
-            {
-                if (charsWritten >= destination.Length)
-                {
-                    return false;
-                }
-                destination[charsWritten] = '.';
-                charsWritten++;
-            }
-            first = false;
-
-            if (charsWritten + label.Length > destination.Length)
-            {
-                return false;
-            }
-
-            Ascii.ToUtf16(label, destination.Slice(charsWritten, label.Length), out _);
-
-            charsWritten += label.Length;
+            // Fast path for non-ACE names: decode directly to destination
+            return TryDecodeAscii(destination, out charsWritten);
         }
 
-        if (charsWritten == 0)
+        // For ACE names, the ASCII intermediate may be longer than the final
+        // Unicode form. Decode to a local buffer first, then convert.
+        // TODO: Switch to span-based IdnMapping.TryGetUnicode when available (.NET 11+)
+        Span<char> ascii = stackalloc char[256];
+        if (!TryDecodeAscii(ascii, out int asciiWritten))
         {
-            // Root name produces "." in dotted form
-            if (destination.Length < 1)
+            return false;
+        }
+
+        try
+        {
+            string unicode = s_idnMapping.GetUnicode(new string(ascii[..asciiWritten]));
+            if (unicode.Length <= destination.Length)
             {
-                return false;
+                unicode.AsSpan().CopyTo(destination);
+                charsWritten = unicode.Length;
+                return true;
             }
-            destination[0] = '.';
-            charsWritten = 1;
+        }
+        catch (ArgumentException)
+        {
+            // IDN conversion failed, fall through to ASCII
+        }
+
+        // Fall back to ACE form
+        if (asciiWritten <= destination.Length)
+        {
+            ascii[..asciiWritten].CopyTo(destination);
+            charsWritten = asciiWritten;
             return true;
         }
 
-        // If any label was ACE-encoded, try to convert the whole name to Unicode
-        // TODO: Switch to span-based IdnMapping.TryGetUnicode when available (.NET 11+)
-        if (_isAce)
-        {
-            try
-            {
-                string unicode = s_idnMapping.GetUnicode(new string(destination[..charsWritten]));
-                if (unicode.Length <= destination.Length)
-                {
-                    unicode.AsSpan().CopyTo(destination);
-                    charsWritten = unicode.Length;
-                }
-                // If the Unicode form doesn't fit, keep the ACE form
-            }
-            catch (ArgumentException)
-            {
-                // If IDN conversion fails, keep the raw ACE form
-            }
-        }
-
-        // Root name produces empty string — that's fine
-        return true;
+        return false;
     }
 
     private static bool IsAceLabel(ReadOnlySpan<byte> label)
@@ -355,6 +333,53 @@ public readonly ref struct DnsEncodedName
         bool success = TryDecode(chars, out int charsWritten);
         Debug.Assert(success);
         return new string(chars[..charsWritten]);
+    }
+
+    /// <summary>
+    /// Decodes the domain name as raw ASCII without IDN conversion.
+    /// </summary>
+    private bool TryDecodeAscii(Span<char> destination, out int charsWritten)
+    {
+        charsWritten = 0;
+        DnsLabelEnumerator enumerator = EnumerateLabels();
+        bool first = true;
+
+        while (enumerator.MoveNext())
+        {
+            ReadOnlySpan<byte> label = enumerator.Current;
+
+            if (!first)
+            {
+                if (charsWritten >= destination.Length)
+                {
+                    return false;
+                }
+                destination[charsWritten] = '.';
+                charsWritten++;
+            }
+            first = false;
+
+            if (charsWritten + label.Length > destination.Length)
+            {
+                return false;
+            }
+
+            Ascii.ToUtf16(label, destination.Slice(charsWritten, label.Length), out _);
+            charsWritten += label.Length;
+        }
+
+        if (charsWritten == 0)
+        {
+            // Root name produces "." in dotted form
+            if (destination.Length < 1)
+            {
+                return false;
+            }
+            destination[0] = '.';
+            charsWritten = 1;
+        }
+
+        return true;
     }
 
     /// <summary>

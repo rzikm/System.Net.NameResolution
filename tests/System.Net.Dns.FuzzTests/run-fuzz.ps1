@@ -10,7 +10,7 @@
     4. Runs the specified fuzz target using libfuzzer-dotnet-windows.exe.
 
 .PARAMETER Target
-    The fuzz target to run. One of: reader, name, writer, roundtrip.
+    The fuzz target to run. One of: reader, name, writer, roundtrip, name-roundtrip.
     Defaults to "reader".
 
 .PARAMETER LibFuzzerPath
@@ -32,7 +32,7 @@
     .\run-fuzz.ps1 -Target writer -ExtraArgs "-jobs=4","-workers=4"
 #>
 param(
-    [ValidateSet("reader", "name", "writer", "roundtrip")]
+    [ValidateSet("reader", "name", "writer", "roundtrip", "name-roundtrip")]
     [string]$Target = "reader",
 
     [string]$LibFuzzerPath = "libfuzzer-dotnet-windows.exe",
