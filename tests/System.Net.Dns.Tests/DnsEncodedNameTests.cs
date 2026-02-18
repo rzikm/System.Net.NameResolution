@@ -120,14 +120,15 @@ public class DnsEncodedNameTests
     }
 
     [Fact]
-    public void TryDecode_Root_ProducesEmptyString()
+    public void TryDecode_Root_ProducesSingleDot()
     {
         Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
         DnsEncodedName.TryEncode(".", nameBuffer, out var name, out _);
 
         Span<char> chars = stackalloc char[64];
         Assert.True(name.TryDecode(chars, out int written));
-        Assert.Equal(0, written);
+        Assert.Equal(1, written);
+        Assert.Equal('.', chars[0]);
     }
 
     [Fact]

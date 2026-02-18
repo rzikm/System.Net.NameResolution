@@ -255,6 +255,7 @@ public static class DnsRecordExtensions
         {
             return false;
         }
+
         result = new DnsSoaRecordData(mname, rname,
             BinaryPrimitives.ReadUInt32BigEndian(fixedData),
             BinaryPrimitives.ReadUInt32BigEndian(fixedData[4..]),
