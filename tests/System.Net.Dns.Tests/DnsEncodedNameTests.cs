@@ -248,30 +248,20 @@ public class DnsEncodedNameTests
     }
 
     [Fact]
-    public void CompressionPointer_SelfReferencing_StopsEnumeration()
+    public void CompressionPointer_SelfReferencing_TryParseFails()
     {
         // Pointer at offset 0 that points to itself
         byte[] message = [0xC0, 0x00];
-        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
-        // Should not infinite-loop; max hop limit kicks in
-        List<string> labels = new();
-        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
-            labels.Add(Encoding.ASCII.GetString(label));
-        // Enumerator returns false after max hops
-        Assert.Empty(labels);
+        Assert.False(DnsEncodedName.TryParse(message, 0, out _, out _));
     }
 
     [Fact]
-    public void CompressionPointer_ForwardPointer_HandledByMaxHops()
+    public void CompressionPointer_ForwardPointer_TryParseFails()
     {
         // Pointer at offset 0 that points forward to offset 2 (past itself, but within buffer)
         // Offset 2 has another pointer back to offset 0 → loop
         byte[] message = [0xC0, 0x02, 0xC0, 0x00];
-        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
-        List<string> labels = new();
-        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
-            labels.Add(Encoding.ASCII.GetString(label));
-        Assert.Empty(labels);
+        Assert.False(DnsEncodedName.TryParse(message, 0, out _, out _));
     }
 
     [Fact]
@@ -284,33 +274,27 @@ public class DnsEncodedNameTests
     }
 
     [Fact]
-    public void CompressionPointer_OutOfBounds_ReturnsFalse()
+    public void CompressionPointer_OutOfBounds_TryParseFails()
     {
         // Pointer to offset 0xFF, far beyond the 4-byte buffer
         byte[] message = [0xC0, 0xFF, 0x00, 0x00];
-        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
-        DnsLabelEnumerator enumerator = name.EnumerateLabels();
-        Assert.False(enumerator.MoveNext());
+        Assert.False(DnsEncodedName.TryParse(message, 0, out _, out _));
     }
 
     [Fact]
-    public void CompressionPointer_ForwardJump_ReturnsFalse()
+    public void CompressionPointer_ForwardJump_TryParseFails()
     {
         // Forward pointer: offset 0 points to offset 2 (forward, not allowed)
         byte[] message = [0xC0, 0x02, 0x01, (byte)'a', 0x00];
-        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
-        DnsLabelEnumerator enumerator = name.EnumerateLabels();
-        Assert.False(enumerator.MoveNext());
+        Assert.False(DnsEncodedName.TryParse(message, 0, out _, out _));
     }
 
     [Fact]
-    public void CompressionPointer_SelfJump_ReturnsFalse()
+    public void CompressionPointer_SelfJump_TryParseFails()
     {
         // Self-referencing pointer: offset 0 points to offset 0
         byte[] message = [0xC0, 0x00, 0x00];
-        Assert.True(DnsEncodedName.TryParse(message, 0, out DnsEncodedName name, out _));
-        DnsLabelEnumerator enumerator = name.EnumerateLabels();
-        Assert.False(enumerator.MoveNext());
+        Assert.False(DnsEncodedName.TryParse(message, 0, out _, out _));
     }
 
     [Fact]
@@ -410,20 +394,12 @@ public class DnsEncodedNameTests
     }
 
     [Fact]
-    public void TryParse_CompressionPointerLoop_ParsesButEnumerationStops()
+    public void TryParse_CompressionPointerLoop_Fails()
     {
         // Two pointers that point at each other: offset 0 → offset 2 → offset 0
-        // TryParse succeeds (wire format is valid: 2-byte pointer), but enumeration
-        // will stop due to loop protection.
+        // TryParse now rejects this because forward jumps are not allowed.
         byte[] buffer = [0xC0, 0x02, 0xC0, 0x00];
-        Assert.True(DnsEncodedName.TryParse(buffer, 0, out DnsEncodedName name, out int consumed));
-        Assert.Equal(2, consumed);
-
-        // Enumerating labels should stop (loop protection)
-        DnsLabelEnumerator enumerator = name.EnumerateLabels();
-        int count = 0;
-        while (enumerator.MoveNext()) count++;
-        Assert.Equal(0, count);
+        Assert.False(DnsEncodedName.TryParse(buffer, 0, out _, out _));
     }
 
     [Fact]

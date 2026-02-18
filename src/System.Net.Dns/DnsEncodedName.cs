@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Globalization;
 
 namespace System.Net;
@@ -52,8 +53,7 @@ public readonly ref struct DnsEncodedName
         }
 
         DnsEncodedName candidate = new DnsEncodedName(buffer, offset);
-        int wireLen = candidate.GetWireLength();
-        if (wireLen < 0)
+        if (!candidate.ValidateLengths(out int wireLen, out _))
         {
             return false;
         }
@@ -373,6 +373,8 @@ public readonly ref struct DnsEncodedName
             length += enumerator.Current.Length;
         }
 
+        Debug.Assert(length <= 253, "Correctly formed names should never exceed 253 chars in dotted form");
+
         if (hasAce)
         {
             // Need to compute actual Unicode length
@@ -428,20 +430,11 @@ public readonly ref struct DnsEncodedName
     /// </summary>
     private int GetAsciiFormattedLength()
     {
-        int length = 0;
-        DnsLabelEnumerator enumerator = EnumerateLabels();
-        bool first = true;
-
-        while (enumerator.MoveNext())
+        if (!ValidateLengths(out _, out int formattedLength))
         {
-            if (!first)
-            {
-                length++; // dot separator
-            }
-            first = false;
-            length += enumerator.Current.Length;
+            return -1;
         }
-        return length;
+        return formattedLength;
     }
 
     /// <summary>
@@ -484,38 +477,89 @@ public readonly ref struct DnsEncodedName
     }
 
     /// <summary>
-    /// Gets the number of bytes consumed by this name in the buffer,
-    /// accounting for compression pointers. Used by the reader to advance past a name.
+    /// Validates the name and computes both the wire-format byte count and the
+    /// dotted ASCII string length in a single pass.
+    /// Returns <c>false</c> if the name is malformed or exceeds RFC 1035 limits.
     /// </summary>
-    internal int GetWireLength()
+    private bool ValidateLengths(out int wireLength, out int formattedLength)
     {
+        wireLength = 0;
+        formattedLength = 0;
+
         int pos = _offset;
+        bool first = true;
+        bool foundWireEnd = false;
+        int hops = 0;
+
         while (pos < _buffer.Length)
         {
             byte b = _buffer[pos];
+
             if (b == 0)
             {
-                return pos + 1 - _offset; // root label
+                // Root label — end of name
+                if (!foundWireEnd)
+                {
+                    wireLength = pos + 1 - _offset;
+                }
+                return true;
             }
+
             if ((b & 0xC0) == 0xC0)
             {
+                // Compression pointer
                 if (pos + 1 >= _buffer.Length)
                 {
-                    break; // truncated pointer
+                    return false; // truncated pointer
                 }
-                return pos + 2 - _offset; // compression pointer
+
+                if (!foundWireEnd)
+                {
+                    wireLength = pos + 2 - _offset;
+                    foundWireEnd = true;
+                }
+
+                int pointer = ((b & 0x3F) << 8) | _buffer[pos + 1];
+                if (pointer >= pos)
+                {
+                    return false; // only backwards jumps allowed
+                }
+                pos = pointer;
+
+                if (++hops > 16)
+                {
+                    return false; // too many pointer hops
+                }
+                continue;
             }
+
             if (b > 63)
             {
-                break; // label too long per RFC 1035
+                return false; // one of the upper 2 bits are nonzero, invalid as per RFC 1035
             }
+
             if (pos + 1 + b > _buffer.Length)
             {
-                break; // malformed: label extends past buffer
+                return false; // label extends past buffer
             }
-            pos += 1 + b; // skip label
+
+            // Account for dot separator in formatted length
+            if (!first)
+            {
+                formattedLength++;
+            }
+            first = false;
+
+            formattedLength += b;
+            if (formattedLength > 253)
+            {
+                return false; // RFC 1035: max 253 characters in dotted form
+            }
+
+            pos += 1 + b; // skip length byte + label
         }
-        return -1; // malformed name
+
+        return false; // ran off the end of buffer without finding root label
     }
 
     private static bool AsciiEqualsIgnoreCase(byte a, byte b)
@@ -596,7 +640,7 @@ public ref struct DnsLabelEnumerator
             int labelLen = b;
             if (labelLen > 63)
             {
-                return false; // label too long per RFC 1035
+                return false; // one of the upper 2 bits are nonzero, invalid as per RFC 1035
             }
             _pos++;
             if (_pos + labelLen > _buffer.Length)

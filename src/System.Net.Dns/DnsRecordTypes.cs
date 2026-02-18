@@ -245,19 +245,16 @@ public static class DnsRecordExtensions
             return false;
         }
 
-        int rnameOffset = record.DataOffset + mnameLen;
-        if (!DnsEncodedName.TryParse(record.Message, rnameOffset, out DnsEncodedName rname, out int rnameLen))
+        if (!DnsEncodedName.TryParse(record.Message, record.DataOffset + mnameLen, out DnsEncodedName rname, out int rnameLen))
         {
             return false;
         }
 
-        int fixedStart = rnameOffset + rnameLen - record.DataOffset;
-        if (fixedStart + 20 > record.Data.Length)
+        ReadOnlySpan<byte> fixedData = record.Data[(mnameLen + rnameLen)..];
+        if (fixedData.Length < 20)
         {
             return false;
         }
-
-        ReadOnlySpan<byte> fixedData = record.Data[fixedStart..];
         result = new DnsSoaRecordData(mname, rname,
             BinaryPrimitives.ReadUInt32BigEndian(fixedData),
             BinaryPrimitives.ReadUInt32BigEndian(fixedData[4..]),

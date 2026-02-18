@@ -236,11 +236,8 @@ public class DnsMessageReaderTests
             0x01, 0x02, 0x03, 0x04, // RDATA
         ];
         DnsMessageReader.TryCreate(malformed, out var reader);
-        // The record can be read structurally (pointer is just 2 bytes to skip)
-        Assert.True(reader.TryReadRecord(out var record));
-        // But the name's labels cannot be enumerated
-        DnsLabelEnumerator enumerator = record.Name.EnumerateLabels();
-        Assert.False(enumerator.MoveNext());
+        // The record name has an invalid pointer, so TryReadRecord fails
+        Assert.False(reader.TryReadRecord(out _));
     }
 
     [Fact]
