@@ -280,14 +280,16 @@ public readonly ref struct DnsEncodedName
 
     // --- Shared: works identically for parsed and created names ---
 
+    // Decodes the domain name into the destination buffer as a dotted string.
+    public bool TryDecode(Span<char> destination, out int charsWritten);
+
     // Compares this name to a dotted string representation (e.g., "example.com").
     // Case-insensitive. Does not allocate.
     public bool Equals(ReadOnlySpan<char> name);
 
-    // Decodes the domain name into the destination buffer as a dotted string.
-    public bool TryDecode(Span<char> destination, out int charsWritten);
-
     // Returns the character count of the decoded dotted string representation.
+    // TODO: This one is optional and not strictly necessary, there is reasonable upper
+    // bound (256) that can be used when allocating space for the TryDecode method
     public int GetFormattedLength();
 
     // Enumerates the individual labels (e.g., "example" then "com").
@@ -307,6 +309,38 @@ public ref struct DnsLabelEnumerator
     public DnsLabelEnumerator GetEnumerator();
 }
 ```
+
+#### Validation
+
+Both `TryParse` (read path) and `TryEncode` (write path) perform the same structural and content validation, ensuring that any successfully created `DnsEncodedName` can be safely enumerated, decoded, and round-tripped without further checks. The `DnsLabelEnumerator` trusts this up-front validation and uses only `Debug.Assert` internally.
+
+**Structural rules (RFC 1035):**
+
+- Each label must be 1–63 bytes (the zero-length root label terminates the name).
+- The dotted ASCII form must not exceed 253 characters.
+- The wire-format encoding must not exceed 255 bytes (`MaxEncodedLength`).
+- The name must be properly terminated with a root label (zero byte).
+
+**Label content rules (LDH + underscore):**
+
+- Labels may only contain ASCII letters (`a-z`, `A-Z`), digits (`0-9`), hyphens (`-`), and underscores (`_`). Underscores are allowed for compatibility with SRV records (`_http._tcp`) and DKIM/DMARC (`_dmarc`, `_domainkey`).
+- Labels must not start or end with a hyphen.
+- Validation uses `SearchValues<byte>` with `IndexOfAnyExcept` for efficient character checking.
+
+**Compression pointer rules (read path only):**
+
+- Compression pointers (two high bits set, per RFC 1035 §4.1.4) must point strictly backwards in the buffer (`pointer < currentPosition`). Forward and self-referencing pointers are rejected to prevent infinite loops from malicious input.
+- A maximum of 16 pointer hops is enforced to bound processing time.
+- Reserved label type bytes (upper two bits = `01` or `10`) are rejected.
+
+**ACE detection:**
+
+- During validation, each label is checked for the `xn--` prefix (case-insensitive) to detect ACE/Punycode-encoded internationalized labels.
+- The result is stored as an internal `_isAce` flag, allowing `TryDecode`, `GetFormattedLength`, and `ToString` to skip IDN processing for pure-ASCII names.
+
+**IDN (write path):**
+
+- If the input name contains non-ASCII characters, it is converted to ACE form via `IdnMapping.GetAscii()` before encoding. The ACE form is then validated with the same label content rules.
 
 ### DnsMessageWriter
 
@@ -772,4 +806,4 @@ IDN conversion is handled transparently by `DnsEncodedName` using `System.Global
 2. **Transparent round-trip**: `TryEncode("münchen.de", ...)` followed by `ToString()` returns `"münchen.de"` — the Unicode form is preserved through the ACE wire encoding.
 3. **ACE pass-through**: Already-ACE names (e.g., `xn--mnchen-3ya.de`) are accepted by `TryEncode` and decoded to Unicode by `ToString()`. There is no double-encoding.
 4. **Graceful fallback**: If `IdnMapping.GetUnicode()` fails during decoding, the raw ACE form is returned rather than throwing an exception.
-5. **STD3 rules**: `IdnMapping` is configured with `UseStd3AsciiRules = true` to enforce hostname validity (no underscores, spaces, etc. in non-IDN labels).
+5. **STD3 rules**: `IdnMapping` is configured with `UseStd3AsciiRules = true` to enforce hostname validity during IDN conversion. Note that `DnsEncodedName`'s own label validation is slightly more permissive than STD3 — it allows underscores for SRV/DKIM compatibility. The STD3 rules only apply to the IDN conversion step (i.e., names containing non-ASCII characters).
