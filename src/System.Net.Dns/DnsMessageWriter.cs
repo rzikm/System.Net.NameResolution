@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace System.Net;
 
 /// <summary>
@@ -39,29 +41,18 @@ public ref struct DnsMessageWriter
         DnsRecordType type,
         DnsRecordClass @class = DnsRecordClass.Internet)
     {
-        // Calculate the flat encoded size by enumerating labels
-        int nameLen = 1; // root label terminator
-        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
-        {
-            nameLen += 1 + label.Length; // length prefix + label bytes
-        }
-
-        int needed = nameLen + 4; // name + 2 bytes type + 2 bytes class
-        if (_bytesWritten + needed > _destination.Length)
+        // Write the name, expanding any compression pointers
+        if (!name.TryCopyEncodedTo(_destination[_bytesWritten..], out int nameWritten))
         {
             return false;
         }
 
-        // Write the name label by label (expands any compression pointers)
-        foreach (ReadOnlySpan<byte> label in name.EnumerateLabels())
+        // Check remaining space for type (2) + class (2)
+        if (_bytesWritten + nameWritten + 4 > _destination.Length)
         {
-            _destination[_bytesWritten] = (byte)label.Length;
-            _bytesWritten++;
-            label.CopyTo(_destination[_bytesWritten..]);
-            _bytesWritten += label.Length;
+            return false;
         }
-        _destination[_bytesWritten] = 0; // root label
-        _bytesWritten++;
+        _bytesWritten += nameWritten;
 
         // Write type (big-endian)
         System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(

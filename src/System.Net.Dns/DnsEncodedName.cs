@@ -30,11 +30,16 @@ public readonly ref struct DnsEncodedName
     // Whether any label is ACE-encoded (starts with "xn--"), indicating IDN/Punycode.
     private readonly bool _isAce;
 
-    internal DnsEncodedName(ReadOnlySpan<byte> buffer, int offset, bool isAce = false)
+    // Whether the wire encoding contains compression pointers.
+    // False for names created via TryEncode (always flat).
+    private readonly bool _hasPointers;
+
+    internal DnsEncodedName(ReadOnlySpan<byte> buffer, int offset, bool isAce, bool hasPointers)
     {
         _buffer = buffer;
         _offset = offset;
         _isAce = isAce;
+        _hasPointers = hasPointers;
     }
 
     /// <summary>
@@ -59,12 +64,21 @@ public readonly ref struct DnsEncodedName
             return false;
         }
 
-        if (!ValidateName(buffer, offset, out int wireLen, out _, out bool isAce))
+        if (!ValidateName(buffer, offset, out int wireLen, out _, out bool isAce, out bool hasPointers))
         {
             return false;
         }
 
-        name = new DnsEncodedName(buffer, offset, isAce);
+        if (!hasPointers)
+        {
+            // Non-pointer names: _buffer is sliced to exactly the encoded bytes
+            name = new DnsEncodedName(buffer[offset..(offset + wireLen)], 0, isAce, hasPointers: false);
+        }
+        else
+        {
+            // Pointer names: full message buffer needed for pointer resolution
+            name = new DnsEncodedName(buffer, offset, isAce, hasPointers: true);
+        }
         bytesConsumed = wireLen;
         return true;
     }
@@ -90,7 +104,7 @@ public readonly ref struct DnsEncodedName
             }
             destination[0] = 0; // root label
             bytesWritten = 1;
-            result = new DnsEncodedName(destination[..1], 0);
+            result = new DnsEncodedName(destination[..1], 0, isAce: false, hasPointers: false);
             return OperationStatus.Done;
         }
 
@@ -168,7 +182,7 @@ public readonly ref struct DnsEncodedName
         destination[wireLen - 1] = 0;
 
         bytesWritten = wireLen;
-        result = new DnsEncodedName(destination[..wireLen], 0, isAce);
+        result = new DnsEncodedName(destination[..wireLen], 0, isAce, hasPointers: false);
         return OperationStatus.Done;
     }
 
@@ -293,29 +307,32 @@ public readonly ref struct DnsEncodedName
     /// </summary>
     public int GetFormattedLength()
     {
-        int length = 0;
-        DnsLabelEnumerator enumerator = EnumerateLabels();
-        bool first = true;
-
         if (_isAce)
         {
-            // If the name contains ACE labels, we need to compute the length of the Unicode form.
-            // This is an approximation since some Unicode characters may be multiple UTF-16 code units,
-            // but it's sufficient for sizing buffers for TryDecode.
+            // ACE names need full IDN conversion to determine the Unicode length.
             Span<char> chars = stackalloc char[256];
             bool success = TryDecode(chars, out int charsWritten);
             Debug.Assert(success);
             return charsWritten;
         }
 
-        while (enumerator.MoveNext())
+        int length = 0;
+        bool first = true;
+
+        foreach (ReadOnlySpan<byte> label in EnumerateLabels())
         {
             if (!first)
             {
                 length++; // dot separator
             }
             first = false;
-            length += enumerator.Current.Length;
+            length += label.Length;
+        }
+
+        // Root name: no labels, formatted as "."
+        if (length == 0)
+        {
+            return 1;
         }
 
         return length;
@@ -326,6 +343,52 @@ public readonly ref struct DnsEncodedName
     /// Follows compression pointers transparently.
     /// </summary>
     public DnsLabelEnumerator EnumerateLabels() => new DnsLabelEnumerator(_buffer, _offset);
+
+    /// <summary>
+    /// Copies the flat wire-format encoding of this name to the destination buffer,
+    /// expanding compression pointers if present.
+    /// </summary>
+    internal bool TryCopyEncodedTo(Span<byte> destination, out int bytesWritten)
+    {
+        bytesWritten = 0;
+
+        if (!_hasPointers)
+        {
+            // Fast path: _buffer is sliced to exactly the encoded bytes starting at _offset
+            ReadOnlySpan<byte> encoded = _buffer[_offset..];
+            if (encoded.Length > destination.Length)
+            {
+                return false;
+            }
+
+            encoded.CopyTo(destination);
+            bytesWritten = encoded.Length;
+            return true;
+        }
+
+        // Slow path: expand compression pointers by copying labels as we go.
+        // MaxEncodedLength bounds the output, so we won't overrun a properly sized buffer.
+        foreach (ReadOnlySpan<byte> label in EnumerateLabels())
+        {
+            if (bytesWritten + 1 + label.Length > destination.Length)
+            {
+                return false;
+            }
+            destination[bytesWritten] = (byte)label.Length;
+            bytesWritten++;
+            label.CopyTo(destination[bytesWritten..]);
+            bytesWritten += label.Length;
+        }
+
+        if (bytesWritten >= destination.Length)
+        {
+            return false;
+        }
+        destination[bytesWritten] = 0; // root label
+        bytesWritten++;
+
+        return true;
+    }
 
     public override string ToString()
     {
@@ -384,15 +447,18 @@ public readonly ref struct DnsEncodedName
 
     /// <summary>
     /// Validates the name and computes the wire-format byte count, the dotted ASCII
-    /// string length, and whether any label is ACE-encoded, all in a single pass.
+    /// string length, and whether any label is ACE-encoded or uses compression pointers,
+    /// all in a single pass.
     /// Returns <c>false</c> if the name is malformed or exceeds RFC 1035 limits.
     /// </summary>
     private static bool ValidateName(ReadOnlySpan<byte> buffer, int offset,
-        out int wireLength, out int formattedLength, out bool isAce)
+        out int wireLength, out int formattedLength, out bool isAce,
+        out bool hasPointers)
     {
         wireLength = 0;
         formattedLength = 0;
         isAce = false;
+        hasPointers = false;
 
         int pos = offset;
         bool foundWireEnd = false;
@@ -424,6 +490,7 @@ public readonly ref struct DnsEncodedName
                 {
                     wireLength = pos + 2 - offset;
                     foundWireEnd = true;
+                    hasPointers = true;
                 }
 
                 int pointer = ((b & 0x3F) << 8) | buffer[pos + 1];

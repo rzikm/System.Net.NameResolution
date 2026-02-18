@@ -241,18 +241,23 @@ Represents a domain name in DNS wire format. Used by both the read path (names p
 
 Internally holds `(ReadOnlySpan<byte> buffer, int offset)`. For names parsed from responses, `buffer` is the full message (needed to follow compression pointers per RFC 1035 §4.1.4). For names created from strings, `buffer` is a small caller-provided encode buffer with flat labels (no compression pointers). Label enumeration handles compression pointers transparently.
 
+Internally, the type also tracks whether the wire encoding contains compression pointers (`_hasPointers`). This enables efficient serialization: names without pointers can be copied with a single `Span.CopyTo`, while names parsed from responses with compression pointers are expanded label-by-label only when needed.
+
 Comparison is case-insensitive per DNS specification.
 
 ```csharp
 namespace System.Net;
 
+// Represents a strongly-typed, validated domain name
 public readonly ref struct DnsEncodedName
 {
     // Maximum wire-format size of any valid domain name
     // (including length prefixes and root label terminator).
     public const int MaxEncodedLength = 255;
 
+    //
     // --- Write path: create from a dotted string ---
+    //
 
     // Validates the name against RFC 1035 rules (label max 63 bytes, total max 253 chars,
     // valid characters) and encodes into wire format in the destination buffer.
@@ -266,7 +271,9 @@ public readonly ref struct DnsEncodedName
         out DnsEncodedName result,
         out int bytesWritten);
 
+    //
     // --- Read path: parse from a wire-format buffer ---
+    //
 
     // Parses a DNS name from a wire-format buffer at the given offset.
     // Validates that the name is well-formed (valid label lengths, no truncation).
@@ -278,19 +285,18 @@ public readonly ref struct DnsEncodedName
         out DnsEncodedName name,
         out int bytesConsumed);
 
+    //
     // --- Shared: works identically for parsed and created names ---
+    //
 
     // Decodes the domain name into the destination buffer as a dotted string.
+    // Decodes punyencoding if applicable
     public bool TryDecode(Span<char> destination, out int charsWritten);
 
     // Compares this name to a dotted string representation (e.g., "example.com").
     // Case-insensitive. Does not allocate.
+    // handles puny encoding transparently
     public bool Equals(ReadOnlySpan<char> name);
-
-    // Returns the character count of the decoded dotted string representation.
-    // TODO: This one is optional and not strictly necessary, there is reasonable upper
-    // bound (256) that can be used when allocating space for the TryDecode method
-    public int GetFormattedLength();
 
     // Enumerates the individual labels (e.g., "example" then "com").
     // Each label is a ReadOnlySpan<byte> of the raw ASCII bytes (no length prefix, no dot).
@@ -299,6 +305,19 @@ public readonly ref struct DnsEncodedName
 
     // Convenience method. Allocates a string.
     public override string ToString();
+
+    //
+    // TODO: optional members below, may be useful in some cases
+    //
+
+    // Returns the character count of the decoded dotted string representation.
+    // there is reasonable upper bound (256) that can be used when allocating space for the TryDecode method
+    public int GetFormattedLength();
+
+    // Copies the encoded representation to the target destination, expanding any compression pointers if
+    // necessary
+    // This method is already used internally to simplify DnsMessageWriter (accepts DnsEncodedName as parameter)
+    public bool TryCopyEncodedTo(Span<byte> destination, out int bytesWritten)
 }
 
 // Duck-typed enumerator for foreach support (same pattern as Span<T>.Enumerator).

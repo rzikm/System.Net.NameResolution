@@ -149,6 +149,23 @@ public class DnsEncodedNameTests
         Assert.Equal("example.com".Length, name.GetFormattedLength());
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData(".")]
+    public void GetFormattedLength_Root_ReturnsOne(string input)
+    {
+        Span<byte> nameBuffer = stackalloc byte[DnsEncodedName.MaxEncodedLength];
+        DnsEncodedName.TryEncode(input, nameBuffer, out var name, out _);
+        int length = name.GetFormattedLength();
+        Assert.Equal(1, length);
+
+        // Verify that GetFormattedLength is sufficient for TryDecode
+        Span<char> decoded = stackalloc char[length];
+        Assert.True(name.TryDecode(decoded, out int written));
+        Assert.Equal(1, written);
+        Assert.Equal('.', decoded[0]);
+    }
+
     [Fact]
     public void ToString_ReturnsFormattedName()
     {
