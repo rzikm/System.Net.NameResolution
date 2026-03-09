@@ -67,7 +67,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
             MaxRetries = 0,
         });
 
-        Task resolveTask = resolver.ResolveAddressesAsync("cancel-udp.test", AddressFamily.InterNetwork, cts.Token);
+        Task resolveTask = resolver.ResolveAddressesAsync("cancel-udp.test", cts.Token);
 
         await udpReceived.WaitAsync(TimeSpan.FromSeconds(5));
 
@@ -111,7 +111,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
             MaxRetries = 0,
         });
 
-        Task resolveTask = resolver.ResolveAddressesAsync("cancel-tcp.test", AddressFamily.InterNetwork, cts.Token);
+        Task resolveTask = resolver.ResolveAddressesAsync("cancel-tcp.test", cts.Token);
 
         // Wait until the server has received the TCP query
         await tcpReceived.WaitAsync(TimeSpan.FromSeconds(5));
@@ -158,7 +158,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         });
 
         await Assert.ThrowsAsync<TimeoutException>(
-            () => resolver.ResolveAddressesAsync("tcp-timeout.test", AddressFamily.InterNetwork));
+            () => resolver.ResolveAddressesAsync("tcp-timeout.test"));
 
         // Unblock the server handler so dispose completes quickly
         serverCanContinue.Set();
@@ -174,7 +174,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
             .Answer(DnsRecordType.CNAME, cnameEncoded, ttl: 300)
             .Answer("real.test", DnsRecordType.A, [10, 0, 0, 99], ttl: 300));
 
-        DnsResult<DnsResolvedAddress> result = await _resolver.ResolveAddressesAsync("alias.test", AddressFamily.InterNetwork);
+        DnsResult<DnsAddress> result = await _resolver.ResolveAddressesAsync("alias.test");
 
         Assert.Equal(DnsResponseCode.NoError, result.ResponseCode);
         Assert.Single(result.Records);
@@ -190,7 +190,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
 
         // Server drops the packet, timeout fires → TimeoutException
         await Assert.ThrowsAsync<TimeoutException>(
-            () => _resolver.ResolveAddressesAsync("timeout.test", AddressFamily.InterNetwork));
+            () => _resolver.ResolveAddressesAsync("timeout.test"));
     }
 
     [Fact]
@@ -201,7 +201,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
         // ServerFailure response code → treated as error
         // With MaxRetries=0, single attempt fails → all servers failed
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _resolver.ResolveAddressesAsync("fail.test", AddressFamily.InterNetwork));
+            () => _resolver.ResolveAddressesAsync("fail.test"));
     }
 
     // --- Malformed responses ---
@@ -213,7 +213,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
 
         // Response is only 4 bytes — too short for a DNS header
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _resolver.ResolveAddressesAsync("truncated.test", AddressFamily.InterNetwork));
+            () => _resolver.ResolveAddressesAsync("truncated.test"));
         Assert.IsType<InvalidDataException>(ex.InnerException);
     }
 
@@ -234,7 +234,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
 
         // Response has QR=0 — not a valid DNS response
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _resolver.ResolveAddressesAsync("notresponse.test", AddressFamily.InterNetwork));
+            () => _resolver.ResolveAddressesAsync("notresponse.test"));
         Assert.IsType<InvalidDataException>(ex.InnerException);
     }
 
@@ -248,7 +248,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
 
         // Response echoes back a different question name than what was queried
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _resolver.ResolveAddressesAsync("wrongquestion.test", AddressFamily.InterNetwork));
+            () => _resolver.ResolveAddressesAsync("wrongquestion.test"));
         Assert.IsType<InvalidDataException>(ex.InnerException);
     }
 
@@ -262,7 +262,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
             .OverrideAnswerCount(2));
 
         await Assert.ThrowsAsync<InvalidDataException>(
-            () => _resolver.ResolveAddressesAsync("malformed-answers.test", AddressFamily.InterNetwork));
+            () => _resolver.ResolveAddressesAsync("malformed-answers.test"));
     }
 
     [Fact]
@@ -278,7 +278,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
                 .Build());
 
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _resolver.ResolveAddressesAsync("malformed-questions.test", AddressFamily.InterNetwork));
+            () => _resolver.ResolveAddressesAsync("malformed-questions.test"));
         Assert.IsType<InvalidDataException>(ex.InnerException);
     }
 
@@ -316,7 +316,7 @@ public class DnsResolverEdgeCaseTests : IAsyncLifetime
                 LoopbackDnsServer.EncodeName("malformed-soa.test"), DnsRecordType.A));
 
         await Assert.ThrowsAsync<InvalidDataException>(
-            () => _resolver.ResolveAddressesAsync("malformed-soa.test", AddressFamily.InterNetwork));
+            () => _resolver.ResolveAddressesAsync("malformed-soa.test"));
     }
 
     [Fact]
@@ -375,7 +375,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(2),
         });
 
-        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("retry.test", AddressFamily.InterNetwork);
+        DnsResult<DnsAddress> result = await resolver.ResolveAddressesAsync("retry.test");
         Assert.Single(result.Records);
         Assert.Equal("10.0.0.1", result.Records[0].Address.ToString());
         Assert.Equal(3, callCount);
@@ -393,11 +393,11 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(2),
         });
 
-        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("nxdomain.test", AddressFamily.InterNetwork);
+        DnsResult<DnsAddress> result = await resolver.ResolveAddressesAsync("nxdomain.test");
         Assert.Equal(DnsResponseCode.NameError, result.ResponseCode);
         Assert.Empty(result.Records);
-        // With NXDOMAIN, only 1 request should have been made (no retries)
-        Assert.Equal(1, _primary.RequestCount);
+        // With NXDOMAIN, only 2 requests should have been made (A + AAAA, no retries)
+        Assert.Equal(2, _primary.RequestCount);
     }
 
     [Fact]
@@ -413,7 +413,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromMilliseconds(200),
         });
 
-        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("failover.test", AddressFamily.InterNetwork);
+        DnsResult<DnsAddress> result = await resolver.ResolveAddressesAsync("failover.test");
         Assert.Single(result.Records);
         Assert.Equal("10.0.0.2", result.Records[0].Address.ToString());
     }
@@ -431,7 +431,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(2),
         });
 
-        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("failover2.test", AddressFamily.InterNetwork);
+        DnsResult<DnsAddress> result = await resolver.ResolveAddressesAsync("failover2.test");
         Assert.Single(result.Records);
         Assert.Equal("10.0.0.3", result.Records[0].Address.ToString());
     }
@@ -460,7 +460,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(2),
         });
 
-        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("malformed-retry.test", AddressFamily.InterNetwork);
+        DnsResult<DnsAddress> result = await resolver.ResolveAddressesAsync("malformed-retry.test");
         Assert.Single(result.Records);
         Assert.Equal("10.0.0.5", result.Records[0].Address.ToString());
         Assert.Equal(2, callCount);
@@ -481,8 +481,8 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(5),
         });
 
-        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync(
-            "tcpfallback.test", AddressFamily.InterNetwork);
+        DnsResult<DnsAddress> result = await resolver.ResolveAddressesAsync(
+            "tcpfallback.test");
 
         Assert.Equal(DnsResponseCode.NoError, result.ResponseCode);
         Assert.Single(result.Records);
@@ -510,7 +510,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(2),
         });
 
-        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("tcpdrop.test", AddressFamily.InterNetwork);
+        DnsResult<DnsAddress> result = await resolver.ResolveAddressesAsync("tcpdrop.test");
         Assert.Single(result.Records);
         Assert.Equal("10.0.0.2", result.Records[0].Address.ToString());
     }
@@ -545,7 +545,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(2),
         });
 
-        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("tcpretry.test", AddressFamily.InterNetwork);
+        DnsResult<DnsAddress> result = await resolver.ResolveAddressesAsync("tcpretry.test");
         Assert.Single(result.Records);
         Assert.Equal("10.0.0.1", result.Records[0].Address.ToString());
         Assert.Equal(2, udpCount);
@@ -582,7 +582,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
             Timeout = TimeSpan.FromSeconds(5),
         });
 
-        DnsResult<DnsResolvedAddress> result = await resolver.ResolveAddressesAsync("large-tcp.test", AddressFamily.InterNetwork);
+        DnsResult<DnsAddress> result = await resolver.ResolveAddressesAsync("large-tcp.test");
         Assert.Equal(recordCount, result.Records.Length);
         Assert.True(_primary.TcpRequestCount > 0, "Expected at least one TCP request");
     }
@@ -604,6 +604,7 @@ public class DnsResolverRetryTests : IAsyncLifetime
         });
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => resolver.ResolveAddressesAsync("allfail-tcp.test", AddressFamily.InterNetwork));
+            () => resolver.ResolveAddressesAsync("allfail-tcp.test"));
     }
 }
+

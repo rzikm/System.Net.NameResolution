@@ -9,7 +9,6 @@ Another motivation exposing more granular access to DNS records, currently, ther
 ## Goals
 
 - **Expose TTL information** from DNS responses through high-level resolution APIs, enabling callers to make informed caching and connection lifetime decisions.
-- **Provide low-level DNS message APIs** for composing DNS query messages and reading DNS response messages. This is necessary because on some platforms (notably Linux), the OS-provided resolution APIs (glibc's `getaddrinfo`) are synchronous-only and do not return TTL values. The low-level APIs also serve advanced users who need fine-grained control over DNS queries.
 - **Minimize allocations** in the low-level APIs by using struct-based reader/writer types that operate over caller-provided buffers.
 - **Support cross-platform operation**, accounting for differences in platform capabilities:
   - On **Windows**, OS-level APIs can return TTL information directly.
@@ -21,6 +20,10 @@ Another motivation exposing more granular access to DNS records, currently, ther
 - **Provide a testable, configurable API** through an instance-based resolver class that supports dependency injection, custom DNS server configuration, and per-instance settings (timeouts, retry policy, etc.).
 - **Implement a stub resolver only** — the built-in resolver will not perform recursive resolution. It assumes the target DNS server (typically a local or ISP recursive resolver) handles recursion.
 
+## For discussion
+
+- **Provide low-level DNS message APIs** For non-Windows platforms, we will need to implement reading/writing of DNS messages, so we may also decide to expose low-level primitives as public API to enable users more fine-grained control.
+
 ## Non-Goals
 
 - **Full recursive resolver** — the implementation delegates recursion to the configured upstream DNS server.
@@ -29,91 +32,246 @@ Another motivation exposing more granular access to DNS records, currently, ther
 - **mDNS / LLMNR** — multicast DNS and link-local multicast name resolution are out of scope.
 - **Full `nsswitch.conf` implementation** — the resolver will handle hosts file lookup and DNS, but will not implement the full NSS plugin pipeline.
 
-## Platform Research: Windows DNS APIs
+## High-Level API: DnsResolver
 
-### Available APIs
+### Overview
 
-Windows provides three levels of DNS query APIs, all in `dnsapi.dll`:
+The high-level API provides an async, TTL-aware DNS resolver built around a single generic entry point. It handles transport (UDP with TCP fallback), retry logic, server failover, and hosts file lookup internally. On Windows, it can delegate to `DnsQueryEx` for the common path. On Linux/macOS, it uses the low-level message primitives to communicate with the configured DNS server.
 
-| API | Min Version | Async | Custom Servers | IPv6 Servers | Notes |
-|-----|-------------|-------|----------------|--------------|-------|
-| `DnsQuery_W` | Win2000 | No | Undocumented (IPv4 only via `pExtra`) | No | Synchronous only, simplest API |
-| `DnsQueryEx` (`DNS_QUERY_REQUEST` v1) | Win8 / Server 2012 | Yes (callback) | Yes (`pDnsServerList` → `DNS_ADDR_ARRAY`) | Yes | Preferred for most scenarios |
-| `DnsQueryEx` (`DNS_QUERY_REQUEST3` v3) | Win11 Build 22000 | Yes (callback) | Yes (`pCustomServers` → `DNS_CUSTOM_SERVER[]`) | Yes | Adds custom server with port/protocol control |
+### Generic `Dns.ResolveAsync<T>` Design
 
-### TTL Exposure
+The core idea is a single generic entry point where the type parameter `T` determines which DNS queries are sent and how the results are parsed:
 
-- Every `DNS_RECORD` in the returned linked list contains a `dwTtl` field (DWORD, in seconds).
-- The TTL value represents the **remaining** TTL, not the original TTL from the authoritative server. When results come from the Windows DNS resolver cache, the TTL decrements each second. Fresh wire responses contain the original TTL.
-- The `DNS_QUERY_BYPASS_CACHE` flag (`0x00000008`) forces a wire query, bypassing the resolver cache. The `DNS_QUERY_DONT_RESET_TTL_VALUES` flag (`0x00100000`) prevents the API from resetting TTL values on cached records.
+```csharp
+// Static API (preferred entry point)
+public static class Dns
+{
+    static Task<DnsResult<T>> ResolveAsync<T>(string name, CancellationToken ct = default)
+        where T : IDnsRecord<T>;
+}
+```
 
-### Resource Record Support
+This aligns with the existing `System.Net.Dns` class pattern and simplifies one-off queries without requiring callers to manage a resolver instance. It could also enable replacing the implementation of existing `Dns.GetHostAddresses` with the new resolver, addressing limitations (no TTL, synchronous-only on Linux).
 
-`DnsQueryEx` supports querying for **any** DNS record type via the `QueryType` field. The returned `DNS_RECORD` union has typed data members for all standard record types, including:
+Each result type `T` implements `IDnsRecord<T>`, which provides a **static abstract resolution strategy**. Rather than mapping `T` to a single DNS record type, each type owns its full resolution logic — it receives a query-sending delegate, sends whatever queries it needs, parses the responses, and returns the result. This avoids any `typeof(T)` branching in the resolver itself and naturally supports complex resolution patterns (e.g., `DnsAddressRecord` querying both A and AAAA, `DnsSrvRecord` collecting additional-section addresses).
 
-- A, AAAA (address records)
-- SRV (service discovery)
-- MX (mail exchange)
-- TXT (text records)
-- CNAME, PTR, NS, SOA
-- NAPTR, SVCB/HTTPS (newer types)
-- DNSSEC-related: DNSKEY, RRSIG, NSEC, NSEC3, DS
-- Generic/unknown record types via `DNS_UNKNOWN_DATA`
+```csharp
+namespace System.Net;
 
-### Custom DNS Server Support
+// Delegate for sending a DNS query and receiving the raw response.
+// Returns a rented buffer and its valid length. The caller must return the buffer to the pool.
+public delegate Task<(byte[] Buffer, int Length)> DnsSendQueryAsync(
+    string name, DnsRecordType type, CancellationToken cancellationToken);
 
-- **`DNS_QUERY_REQUEST` (v1)**: The `pDnsServerList` field accepts a `DNS_ADDR_ARRAY` with IPv4 and IPv6 server addresses. Custom servers **replace** the system-configured servers entirely.
-- **`DNS_QUERY_REQUEST3` (v3)**: Adds `pCustomServers` field pointing to `DNS_CUSTOM_SERVER[]`, which allows specifying server address, port, and protocol (UDP/TCP). Only one of `pDnsServerList` and `pCustomServers` may be non-null. Note: custom servers are ignored if the query name matches a **Name Resolution Policy Table (NRPT)** rule.
+public interface IDnsRecord<TSelf> where TSelf : IDnsRecord<TSelf>
+{
+    // Each type provides its own resolution strategy.
+    // The delegate handles transport (UDP/TCP, retries, server failover).
+    // The type handles query composition and response parsing.
+    //
+    // note: This member is *not* public
+    static abstract Task<DnsResult<TSelf>> ResolveAsync(
+        string name,
+        DnsSendQueryAsync sendQueryAsync,
+        CancellationToken cancellationToken);
 
-### Hosts File Behavior
+    // Overload to allow specifying only A or only AAAA records
+    public static Task<DnsResult<DnsAddressRecord>> ResolveAddressesAsync(
+        string hostName, AddressFamily addressFamily, CancellationToken cancellationToken = default);
+}
+```
 
-- By default, `DnsQueryEx` **respects the hosts file** — entries in the hosts file are returned before querying DNS servers.
-- The `DNS_QUERY_NO_HOSTS_FILE` flag (`0x00000040`) skips the hosts file lookup.
-- The `DNS_QUERY_WIRE_ONLY` flag (`0x00000100`) bypasses both the cache and the hosts file, sending the query directly over the network.
+Usage:
 
-### Async Operation
+```csharp
+// Simple address lookup (queries both A and AAAA)
+DnsResult<DnsAddressRecord> addresses = await Dns.ResolveAsync<DnsAddressRecord>("example.com");
 
-- When `pQueryCompletionCallback` is set in the request structure, `DnsQueryEx` returns `DNS_REQUEST_PENDING` and invokes the callback when complete.
-- When `pQueryCompletionCallback` is NULL, the call is synchronous.
-- Async queries can be cancelled via `DnsCancelQuery` using the `DNS_QUERY_CANCEL` handle.
-- Note: some scenarios always execute synchronously regardless of the callback (e.g., local machine name queries, IP address queries, error cases).
+// SRV lookup for service discovery (collects additional-section addresses)
+DnsResult<DnsSrvRecord> services = await Dns.ResolveAsync<DnsSrvRecord>("_http._tcp.example.com");
 
-### Raw Message Access
+// MX lookup
+DnsResult<DnsMxRecord> mailServers = await Dns.ResolveAsync<DnsMxRecord>("example.com");
 
-The `DNS_QUERY_RETURN_MESSAGE` flag (`0x00020000`) causes `DnsQueryEx` to populate `pbDnsResponseMessage` and `cbDnsResponseMessage` in the result structure with the raw wire-format DNS response. This provides access to the complete DNS message, including all sections and flags, for custom parsing.
+// TXT lookup
+DnsResult<DnsTxtResult> txtRecords = await Dns.ResolveAsync<DnsTxtResult>("example.com");
 
-### Server Failover and Timeout Behavior
+// PTR lookup (reverse DNS)
+DnsResult<DnsPtrResult> ptr = await Dns.ResolveAsync<DnsPtrResult>("1.0.0.10.in-addr.arpa");
 
-Experimental testing (see `experiments/dns_server_test.c`) confirmed the following behavior when `pDnsServerList` contains multiple servers:
+// CNAME lookup
+DnsResult<DnsCNameResult> cname = await Dns.ResolveAsync<DnsCNameResult>("www.example.com");
 
-| Scenario | Result | Duration |
-|----------|--------|----------|
-| Two valid servers | Success | ~16ms |
-| Unreachable first + valid second | Success (failover) | ~1031ms |
-| Two unreachable servers | Timeout (`DNS_ERROR_RCODE_SERVER_FAILURE`) | ~12047ms |
-| System default (no custom servers) | Success | ~31ms |
+// NS lookup
+DnsResult<DnsNsResult> ns = await Dns.ResolveAsync<DnsNsResult>("example.com");
+```
 
-**Key observations:**
+### Result Wrapper
 
-- **`DnsQueryEx` handles server failover internally.** When the first server is unreachable, it automatically tries the next server after ~1 second.
-- **The total timeout for all-unreachable servers (~12s for 2 servers) suggests internal retry logic** — roughly 3 attempts per server at ~2s each, or a similar internal retry schedule. This is not documented by Microsoft and may vary across Windows versions.
-- **When multiple valid servers are provided, only the first appears to be queried** (identical TTL values across runs), meaning `DnsQueryEx` does not load-balance across servers.
-- **There is no public API to control per-server timeout, retry count, or the overall timeout** when using `DnsQueryEx`. The retry/failover behavior is entirely internal to the Windows DNS client.
+High-level methods return `DnsResult<T>`, a generic wrapper that carries the DNS response code alongside the resolved records. This allows callers to distinguish between:
 
-### Known Quirks and Limitations
+- **Success**: `ResponseCode == NoError`, `Records` is non-empty
+- **NODATA**: `ResponseCode == NoError`, `Records` is empty (name exists but has no records of the requested type)
+- **NXDOMAIN**: `ResponseCode == NameError`, `Records` is empty (name does not exist)
 
-- There have been reports of bugs in `DnsQueryEx`'s async/sync handling on certain Windows builds ([reference](https://dblohm7.ca/blog/2022/05/06/dnsqueryex-needs-love/)).
-- Setting both `pDnsServerList` and `InterfaceIndex` simultaneously can cause failures unless the interface index is valid for the given servers.
-- Windows may hard-code resolution of certain Microsoft domains regardless of hosts file entries (security measure).
+For negative responses (NXDOMAIN/NODATA), `NegativeCacheExpiresAt` is populated from the SOA minimum TTL in the authority section (per RFC 2308 §5), enabling callers to cache negative results.
 
-### Implications for Our Design
+```csharp
+namespace System.Net;
 
-1. **On Windows, we can use `DnsQueryEx` for the high-level TTL-aware API** — it provides TTL, supports all record types, respects the hosts file, and supports async operation. No need for our own stub resolver on Windows.
-2. **Custom DNS server support maps naturally** — `DnsResolverOptions.Servers` can map to `pDnsServerList` or `pCustomServers`.
-3. **The TTL is "remaining" TTL, not "original"** — this is actually what consumers want (how long until this record expires), so it maps well to our `ExpiresAt` pattern.
-4. **`DNS_QUERY_REQUEST3` (v3) adds port/protocol control** but requires Win11 Build 22000+. We may need a fallback to v1 on older Windows versions.
-5. **The low-level message APIs (reader/writer) are still needed** for Linux/macOS and for advanced scenarios on all platforms, but on Windows we don't need them for the common high-level path.
-6. **Server failover is handled by `DnsQueryEx` on Windows** — the API automatically tries the next server in the list after ~1s. Retry count and per-server timeout are not configurable through public API, which constrains how much control we can offer on Windows through `DnsResolverOptions`.
+public readonly struct DnsResult<T>
+{
+    public DnsResponseCode ResponseCode { get; }
+    public T[] Records { get; }
+    public DateTimeOffset? NegativeCacheExpiresAt { get; }
+}
+```
+
+### Record Types
+
+Each record type is a regular struct (heap-safe, usable across `await` boundaries). All carry `DateTimeOffset ExpiresAt` computed from the wire TTL. Each type implements `IDnsRecord<TSelf>` with its own resolution strategy.
+
+```csharp
+namespace System.Net;
+
+// Queries both A and AAAA, returns all addresses.
+public readonly struct DnsAddressRecord : IDnsRecord<DnsAddressRecord>
+{
+    public IPAddress Address { get; }
+    public DateTimeOffset ExpiresAt { get; }
+}
+
+// Queries SRV, collects additional-section A/AAAA records for each target.
+public readonly struct DnsSrvRecord : IDnsRecord<DnsSrvRecord>
+{
+    public string Target { get; }
+    public ushort Port { get; }
+    public ushort Priority { get; }
+    public ushort Weight { get; }
+    public DateTimeOffset ExpiresAt { get; }
+    public DnsAddressRecord[]? Addresses { get; }
+}
+
+public readonly struct DnsMxRecord : IDnsRecord<DnsMxRecord>
+{
+    public string Exchange { get; }
+    public ushort Preference { get; }
+    public DateTimeOffset ExpiresAt { get; }
+}
+
+public readonly struct DnsTxtResult : IDnsRecord<DnsTxtResult>
+{
+    public string[] Strings { get; }
+    public DateTimeOffset ExpiresAt { get; }
+}
+
+public readonly struct DnsCNameResult : IDnsRecord<DnsCNameResult>
+{
+    public string CanonicalName { get; }
+    public DateTimeOffset ExpiresAt { get; }
+}
+
+public readonly struct DnsPtrResult : IDnsRecord<DnsPtrResult>
+{
+    public string Name { get; }
+    public DateTimeOffset ExpiresAt { get; }
+}
+
+public readonly struct DnsNsResult : IDnsRecord<DnsNsResult>
+{
+    public string Name { get; }
+    public DateTimeOffset ExpiresAt { get; }
+}
+```
+
+### Alternative Design: separate methods for each type
+
+```csharp
+
+static class Dns
+{
+    // There are no conflicts with existing Dns methods. Most existing methods start with GetHost*
+
+    // existing (obsolete) method
+    // public static System.Net.IPHostEntry Resolve(string hostName);
+
+    // Queries both A and AAAA, returns all addresses.
+    public static Task<DnsResult<DnsAddressRecord>> ResolveAddressesAsync(
+        string hostName, CancellationToken cancellationToken = default);
+
+    // Overload to allow specifying only A or only AAAA records
+    public static Task<DnsResult<DnsAddressRecord>> ResolveAddressesAsync(
+        string hostName, AddressFamily addressFamily, CancellationToken cancellationToken = default);
+
+    // SRV lookup. Collects additional-section A/AAAA records for each target.
+    public static Task<DnsResult<DnsSrvRecord>> ResolveServiceAsync(
+        string serviceName, CancellationToken cancellationToken = default);
+
+    // MX lookup.
+    public static Task<DnsResult<DnsMxRecord>> ResolveMxAsync(
+        string name, CancellationToken cancellationToken = default);
+
+    // TXT lookup. Each record's Strings are the character-strings decoded as UTF-8.
+    public static Task<DnsResult<DnsTxtResult>> ResolveTxtAsync(
+        string name, CancellationToken cancellationToken = default);
+
+    // CNAME lookup.
+    public static Task<DnsResult<DnsCNameResult>> ResolveCNameAsync(
+        string name, CancellationToken cancellationToken = default);
+
+    // PTR lookup (reverse DNS).
+    public static Task<DnsResult<DnsPtrResult>> ResolvePtrAsync(
+        string name, CancellationToken cancellationToken = default);
+
+    // NS lookup.
+    public static Task<DnsResult<DnsNsResult>> ResolveNsAsync(
+        string name, CancellationToken cancellationToken = default);
+}
+
+```
+
+### Alternative Design: Instance-Based API
+
+For scenarios requiring custom configuration (specific DNS servers, timeout tuning, dependency injection), an instance-based `DnsResolver` can be also provided:
+
+```csharp
+namespace System.Net;
+
+public class DnsResolver : IAsyncDisposable, IDisposable
+{
+    // uses default options (system-configured DNS server)
+    public DnsResolver();
+
+    public DnsResolver(DnsResolverOptions options);
+
+    // Generic: resolve any supported record type.
+    public Task<DnsResult<T>> ResolveAsync<T>(
+        string name,
+        CancellationToken cancellationToken = default)
+        where T : IDnsRecord<T>;
+
+    // or method-per-type alternative, same as static Dns methods
+
+    public void Dispose();
+    public ValueTask DisposeAsync();
+}
+
+public class DnsResolverOptions
+{
+    public IList<IPEndPoint> Servers { get; set; } = new List<IPEndPoint>();
+    public int MaxRetries { get; set; } = 2;
+    public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(3);
+    public bool UseHostsFile { get; set; } = true;
+}
+```
+
+### Open Questions
+
+1. **`IDnsRecord<T>` extensibility**: The interface is public, so third-party types could implement it. However, the `DnsSendQueryAsync` delegate exposes the internal query mechanism (rented buffers). Should this be public or internal? If public, it enables user-defined record types. If internal, the set of supported types is sealed.
+
+2. **Search domains**: Should `DnsResolverOptions` expose a `SearchDomains` override, or should the resolver always read from system config? Should `QueryAsync` also apply search domain expansion, or only `ResolveAsync<T>`?
+
+3. **Failover and timeout configuration**: `DnsQueryEx` on Windows handles failover internally with no public API to control it. Options: expose options as best-effort hints, don't expose them, or bypass `DnsQueryEx` for full control on all platforms.
 
 ## Low-Level API: DNS Message Primitives (Draft)
 
@@ -125,6 +283,56 @@ The low-level API provides non-allocating, type-safe primitives for constructing
 - **`Try*` pattern**: All operations return `bool` to indicate success/failure (buffer too small, malformed data), rather than throwing exceptions. This is consistent with low-level .NET APIs.
 - **Sequential cursor**: Both reader and writer maintain an internal position that advances with each operation. DNS messages are inherently sequential (header → questions → answers → authority → additional).
 - **Lazy domain name resolution**: `DnsEncodedName` holds a reference to the full message buffer and resolves compression pointers on demand, avoiding intermediate copies.
+
+### DnsQueryResult
+
+Bridges the high-level transport layer (retry, server failover, TCP fallback) with the low-level message parser. Returns the raw wire-format response so the user can parse it with `DnsMessageReader` for full access to all sections and record types.
+
+```csharp
+namespace System.Net;
+
+public class DnsQueryResult : IDisposable
+{
+    public DnsResponseCode ResponseCode { get; }
+    public DnsHeaderFlags Flags { get; }
+    public ReadOnlyMemory<byte> ResponseMessage { get; }
+    public void Dispose();
+}
+
+public static class Dns
+{
+    public static Task<DnsQueryResult> ResolveAsync(DnsRecordType recordType, DnsRecordClass recordClass, string name, CancellationToken ct = default);
+}
+```
+
+### DnsMessageReader
+
+A ref struct that reads DNS messages from a buffer. Reads sequentially: header (parsed eagerly in TryCreate), then questions, then resource records (answers, authority, additional in order).
+
+The caller uses `Header.QuestionCount`, `Header.AnswerCount`, `Header.AuthorityCount`, and `Header.AdditionalCount` to determine how many items to read and which section each record belongs to.
+
+```csharp
+namespace System.Net;
+
+public ref struct DnsMessageReader
+{
+    // Attempts to create a reader. Parses the header eagerly.
+    // Returns false if the buffer is too small for a valid header.
+    public static bool TryCreate(ReadOnlySpan<byte> message, out DnsMessageReader reader);
+
+    // The parsed message header.
+    public DnsMessageHeader Header { get; }
+
+    // Reads the next question from the message.
+    // Call Header.QuestionCount times.
+    public bool TryReadQuestion(out DnsQuestion question);
+
+    // Reads the next resource record from the message.
+    // Call (Header.AnswerCount + Header.AuthorityCount + Header.AdditionalCount) times.
+    // Use the header counts to determine which section each record belongs to.
+    public bool TryReadRecord(out DnsRecord record);
+}
+```
 
 ### Enums
 
@@ -391,35 +599,6 @@ public ref struct DnsMessageWriter
 }
 ```
 
-### DnsMessageReader
-
-A ref struct that reads DNS messages from a buffer. Reads sequentially: header (parsed eagerly in TryCreate), then questions, then resource records (answers, authority, additional in order).
-
-The caller uses `Header.QuestionCount`, `Header.AnswerCount`, `Header.AuthorityCount`, and `Header.AdditionalCount` to determine how many items to read and which section each record belongs to.
-
-```csharp
-namespace System.Net;
-
-public ref struct DnsMessageReader
-{
-    // Attempts to create a reader. Parses the header eagerly.
-    // Returns false if the buffer is too small for a valid header.
-    public static bool TryCreate(ReadOnlySpan<byte> message, out DnsMessageReader reader);
-
-    // The parsed message header.
-    public DnsMessageHeader Header { get; }
-
-    // Reads the next question from the message.
-    // Call Header.QuestionCount times.
-    public bool TryReadQuestion(out DnsQuestion question);
-
-    // Reads the next resource record from the message.
-    // Call (Header.AnswerCount + Header.AuthorityCount + Header.AdditionalCount) times.
-    // Use the header counts to determine which section each record belongs to.
-    public bool TryReadRecord(out DnsRecord record);
-}
-```
-
 ### DnsQuestion
 
 Represents a parsed question entry from the question section.
@@ -624,180 +803,6 @@ for (int i = 0; i < reader.Header.AnswerCount; i++)
 }
 ```
 
-## High-Level API: DnsResolver
-
-### Overview
-
-The high-level API provides an instance-based, async, TTL-aware DNS resolver. It handles transport (UDP with TCP fallback), retry logic, server failover, and hosts file lookup internally. On Windows, it delegates to `DnsQueryEx` for the common path. On Linux/macOS, it uses the low-level message primitives to communicate with the configured DNS server.
-
-### Result Types
-
-Result types are regular structs (heap-safe, usable across `await` boundaries). Each result carries a `DateTimeOffset ExpiresAt` computed from the wire TTL at the time the response was received.
-
-High-level methods return `DnsResult<T>`, a generic wrapper that carries the DNS response code alongside the resolved records. This allows callers to distinguish between:
-
-- **Success**: `ResponseCode == NoError`, `Records` is non-empty
-- **NODATA**: `ResponseCode == NoError`, `Records` is empty (name exists but has no records of the requested type)
-- **NXDOMAIN**: `ResponseCode == NameError`, `Records` is empty (name does not exist)
-
-For negative responses (NXDOMAIN/NODATA), `NegativeCacheExpiresAt` is populated from the SOA minimum TTL in the authority section (per RFC 2308 §5), enabling callers to cache negative results.
-
-```csharp
-namespace System.Net;
-
-public readonly struct DnsResult<T>
-{
-    // The DNS response code.
-    public DnsResponseCode ResponseCode { get; }
-
-    // Resolved records. Empty on error or NODATA.
-    public T[] Records { get; }
-
-    // For (external) caching of negative responses, the expiration time derived from the SOA minimum TTL
-    // in the authority section. Null if no SOA was present or the response was successful.
-    // Alternative: int NegativeCacheTtl
-    public DateTimeOffset? NegativeCacheExpiresAt { get; }
-}
-
-public readonly struct DnsResolvedAddress
-{
-    public IPAddress Address { get; }
-    // Alternative: int Ttl
-    public DateTimeOffset ExpiresAt { get; }
-}
-
-public readonly struct DnsResolvedService
-{
-    public string Target { get; }
-    public ushort Port { get; }
-    public ushort Priority { get; }
-    public ushort Weight { get; }
-
-    // Alternative: int Ttl
-    public DateTimeOffset ExpiresAt { get; }
-
-    // Addresses from the additional section of the SRV response, if present.
-    // Avoids a separate A/AAAA lookup when the server provides them inline.
-    public DnsResolvedAddress[]? Addresses { get; }
-}
-```
-
-### DnsResolver
-
-```csharp
-namespace System.Net;
-
-public class DnsResolver : IAsyncDisposable, IDisposable
-{
-    // Uses system-configured DNS servers (resolv.conf / Windows registry).
-    public DnsResolver();
-
-    // Uses the provided options.
-    public DnsResolver(DnsResolverOptions options);
-
-    // High-level: hostname → addresses with TTL.
-    // AddressFamily.Unspecified queries both A and AAAA.
-    // Respects hosts file unless disabled in options.
-    public Task<DnsResult<DnsResolvedAddress>> ResolveAddressesAsync(
-        string hostName,
-        AddressFamily addressFamily = AddressFamily.Unspecified,
-        CancellationToken cancellationToken = default);
-
-    // High-level: SRV record lookup for service discovery.
-    public Task<DnsResult<DnsResolvedService>> ResolveServiceAsync(
-        string serviceName,
-        CancellationToken cancellationToken = default);
-
-    // Low-level: arbitrary DNS query for any record type (class is always IN).
-    // Returns the raw wire-format response for parsing with DnsMessageReader.
-    // For non-IN class queries, use the low-level message primitives
-    // (DnsMessageWriter/DnsMessageReader) to construct and send queries directly.
-    public Task<DnsQueryResult> QueryAsync(
-        string name,
-        DnsRecordType type,
-        CancellationToken cancellationToken = default);
-
-    public void Dispose();
-    public ValueTask DisposeAsync();
-}
-```
-
-### DnsQueryResult
-
-Bridges the high-level transport layer (retry, server failover, TCP fallback) with the low-level message parser. Returns the raw wire-format response so the user can parse it with `DnsMessageReader` for full access to all sections and record types.
-
-```csharp
-namespace System.Net;
-
-public class DnsQueryResult : IDisposable
-{
-    // Response code from the header (note: only lower 4 bits;
-    // full 12-bit RCODE requires parsing the OPT record if present).
-    public DnsResponseCode ResponseCode { get; }
-    public DnsHeaderFlags Flags { get; }
-
-    // Full wire-format response. Parse with:
-    //   DnsMessageReader.TryCreate(result.ResponseMessage.Span, out var reader);
-    public ReadOnlyMemory<byte> ResponseMessage { get; }
-
-    public void Dispose();
-}
-```
-
-### DnsResolverOptions
-
-```csharp
-namespace System.Net;
-
-public class DnsResolverOptions
-{
-    // DNS servers to query. If empty, uses system-configured servers.
-    public IList<IPEndPoint> Servers { get; set; } = new List<IPEndPoint>();
-
-    // Maximum number of retry attempts per server.
-    // NOTE: Subject to open question #2 — may not be honored on Windows.
-    public int MaxRetries { get; set; } = 2;
-
-    // Timeout per individual query attempt.
-    // NOTE: Subject to open question #2 — may not be honored on Windows.
-    public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(3);
-
-    // Whether to check the hosts file before querying DNS.
-    public bool UseHostsFile { get; set; } = true;
-}
-```
-
-### Open Questions
-
-1. **Search domains**: Search domain expansion (`resolv.conf` `search` directive + `ndots` option) is critical for Kubernetes, where services are accessed by short names (e.g., `my-service` → `my-service.default.svc.cluster.local`). This is a client-side feature — the DNS server doesn't handle it. On Windows, `DnsQueryEx` applies system search domains automatically. On Linux/macOS, our stub resolver would need to implement the expansion logic itself. Questions to resolve:
-   - Should `DnsResolverOptions` expose a `SearchDomains` override, or should the resolver always read them from system config (`resolv.conf`)?
-   - Should `QueryAsync` (the low-level arbitrary query) also apply search domain expansion, or only the high-level convenience methods (`ResolveAddressesAsync`, `ResolveServiceAsync`)?
-
-2. **Failover and timeout configuration**: Experimental testing shows that `DnsQueryEx` on Windows handles server failover and retries internally (~1s per-server timeout, ~12s total for 2 unreachable servers), with **no public API to control this behavior**. On Linux/macOS, our stub resolver would implement failover ourselves and could expose full control. This creates a platform consistency problem:
-   - **Option A: Expose `MaxRetries` / `Timeout` options and only honor them on Linux/macOS.** This is honest but creates confusing platform-dependent behavior — the same settings would have different effects on different OSes.
-   - **Option B: Do not expose retry/timeout options.** Accept the platform's default behavior on Windows and implement reasonable defaults on Linux/macOS to approximate Windows behavior. Simpler API, but limits advanced users.
-   - **Option C: Bypass `DnsQueryEx` on Windows and implement our own failover on all platforms.** This gives full control but sacrifices integration with Windows DNS client features (cache, NRPT policy, system search domains).
-   - **Option D: Expose options but document them as best-effort hints.** Settings are applied precisely on Linux/macOS and ignored (or approximated) on Windows. This matches how some .NET networking options already work across platforms.
-
-### Alternative Design: Static API
-
-An alternative to the instance-based `DnsResolver` is to expose the same methods as static methods accepting `DnsResolverOptions` as a parameter:
-
-```csharp
-public static class DnsResolver
-{
-    public static Task<DnsResolvedAddress[]> ResolveAddressesAsync(
-        string hostName,
-        DnsResolverOptions? options = null,
-        CancellationToken cancellationToken = default);
-    // ...
-}
-```
-
-This would simplify one-off queries and could also enable replacing the implementation of existing `System.Net.Dns` static methods (e.g., `Dns.GetHostAddresses`) with the new resolver, addressing some of their current limitations (no TTL, synchronous-only on Linux) without requiring callers to manage a resolver instance.
-
-However, static methods introduce challenges around resource management (socket reuse, connection pooling for TCP fallback) and testability (cannot be injected or mocked). The instance-based design is preferred as the primary API, with static convenience methods as a possible future addition.
-
 ## Future Work: EDNS0 (OPT Record) Support
 
 EDNS0 (RFC 6891) extends DNS via a pseudo-record (OPT, type 41) placed in the additional section. It is practically required for modern DNS usage — without it, UDP responses are capped at 512 bytes, causing unnecessary TCP fallback. Support can be added incrementally on top of the current design:
@@ -826,3 +831,89 @@ IDN conversion is handled transparently by `DnsEncodedName` using `System.Global
 3. **ACE pass-through**: Already-ACE names (e.g., `xn--mnchen-3ya.de`) are accepted by `TryEncode` and decoded to Unicode by `ToString()`. There is no double-encoding.
 4. **Graceful fallback**: If `IdnMapping.GetUnicode()` fails during decoding, the raw ACE form is returned rather than throwing an exception.
 5. **STD3 rules**: `IdnMapping` is configured with `UseStd3AsciiRules = true` to enforce hostname validity during IDN conversion. Note that `DnsEncodedName`'s own label validation is slightly more permissive than STD3 — it allows underscores for SRV/DKIM compatibility. The STD3 rules only apply to the IDN conversion step (i.e., names containing non-ASCII characters).
+
+## Platform Research: Windows DNS APIs
+
+### Available APIs
+
+Windows provides three levels of DNS query APIs, all in `dnsapi.dll`:
+
+| API | Min Version | Async | Custom Servers | IPv6 Servers | Notes |
+|-----|-------------|-------|----------------|--------------|-------|
+| `DnsQuery_W` | Win2000 | No | Undocumented (IPv4 only via `pExtra`) | No | Synchronous only, simplest API |
+| `DnsQueryEx` (`DNS_QUERY_REQUEST` v1) | Win8 / Server 2012 | Yes (callback) | Yes (`pDnsServerList` → `DNS_ADDR_ARRAY`) | Yes | Preferred for most scenarios |
+| `DnsQueryEx` (`DNS_QUERY_REQUEST3` v3) | Win11 Build 22000 | Yes (callback) | Yes (`pCustomServers` → `DNS_CUSTOM_SERVER[]`) | Yes | Adds custom server with port/protocol control |
+
+### TTL Exposure
+
+- Every `DNS_RECORD` in the returned linked list contains a `dwTtl` field (DWORD, in seconds).
+- The TTL value represents the **remaining** TTL, not the original TTL from the authoritative server. When results come from the Windows DNS resolver cache, the TTL decrements each second. Fresh wire responses contain the original TTL.
+- The `DNS_QUERY_BYPASS_CACHE` flag (`0x00000008`) forces a wire query, bypassing the resolver cache. The `DNS_QUERY_DONT_RESET_TTL_VALUES` flag (`0x00100000`) prevents the API from resetting TTL values on cached records.
+
+### Resource Record Support
+
+`DnsQueryEx` supports querying for **any** DNS record type via the `QueryType` field. The returned `DNS_RECORD` union has typed data members for all standard record types, including:
+
+- A, AAAA (address records)
+- SRV (service discovery)
+- MX (mail exchange)
+- TXT (text records)
+- CNAME, PTR, NS, SOA
+- NAPTR, SVCB/HTTPS (newer types)
+- DNSSEC-related: DNSKEY, RRSIG, NSEC, NSEC3, DS
+- Generic/unknown record types via `DNS_UNKNOWN_DATA`
+
+### Custom DNS Server Support
+
+- **`DNS_QUERY_REQUEST` (v1)**: The `pDnsServerList` field accepts a `DNS_ADDR_ARRAY` with IPv4 and IPv6 server addresses. Custom servers **replace** the system-configured servers entirely.
+- **`DNS_QUERY_REQUEST3` (v3)**: Adds `pCustomServers` field pointing to `DNS_CUSTOM_SERVER[]`, which allows specifying server address, port, and protocol (UDP/TCP). Only one of `pDnsServerList` and `pCustomServers` may be non-null. Note: custom servers are ignored if the query name matches a **Name Resolution Policy Table (NRPT)** rule.
+
+### Hosts File Behavior
+
+- By default, `DnsQueryEx` **respects the hosts file** — entries in the hosts file are returned before querying DNS servers.
+- The `DNS_QUERY_NO_HOSTS_FILE` flag (`0x00000040`) skips the hosts file lookup.
+- The `DNS_QUERY_WIRE_ONLY` flag (`0x00000100`) bypasses both the cache and the hosts file, sending the query directly over the network.
+
+### Async Operation
+
+- When `pQueryCompletionCallback` is set in the request structure, `DnsQueryEx` returns `DNS_REQUEST_PENDING` and invokes the callback when complete.
+- When `pQueryCompletionCallback` is NULL, the call is synchronous.
+- Async queries can be cancelled via `DnsCancelQuery` using the `DNS_QUERY_CANCEL` handle.
+- Note: some scenarios always execute synchronously regardless of the callback (e.g., local machine name queries, IP address queries, error cases).
+
+### Raw Message Access
+
+The `DNS_QUERY_RETURN_MESSAGE` flag (`0x00020000`) causes `DnsQueryEx` to populate `pbDnsResponseMessage` and `cbDnsResponseMessage` in the result structure with the raw wire-format DNS response. This provides access to the complete DNS message, including all sections and flags, for custom parsing.
+
+### Server Failover and Timeout Behavior
+
+Experimental testing (see `experiments/dns_server_test.c`) confirmed the following behavior when `pDnsServerList` contains multiple servers:
+
+| Scenario | Result | Duration |
+|----------|--------|----------|
+| Two valid servers | Success | ~16ms |
+| Unreachable first + valid second | Success (failover) | ~1031ms |
+| Two unreachable servers | Timeout (`DNS_ERROR_RCODE_SERVER_FAILURE`) | ~12047ms |
+| System default (no custom servers) | Success | ~31ms |
+
+**Key observations:**
+
+- **`DnsQueryEx` handles server failover internally.** When the first server is unreachable, it automatically tries the next server after ~1 second.
+- **The total timeout for all-unreachable servers (~12s for 2 servers) suggests internal retry logic** — roughly 3 attempts per server at ~2s each, or a similar internal retry schedule. This is not documented by Microsoft and may vary across Windows versions.
+- **When multiple valid servers are provided, only the first appears to be queried** (identical TTL values across runs), meaning `DnsQueryEx` does not load-balance across servers.
+- **There is no public API to control per-server timeout, retry count, or the overall timeout** when using `DnsQueryEx`. The retry/failover behavior is entirely internal to the Windows DNS client.
+
+### Known Quirks and Limitations
+
+- There have been reports of bugs in `DnsQueryEx`'s async/sync handling on certain Windows builds ([reference](https://dblohm7.ca/blog/2022/05/06/dnsqueryex-needs-love/)).
+- Setting both `pDnsServerList` and `InterfaceIndex` simultaneously can cause failures unless the interface index is valid for the given servers.
+- Windows may hard-code resolution of certain Microsoft domains regardless of hosts file entries (security measure).
+
+### Implications for Our Design
+
+1. **On Windows, we can use `DnsQueryEx` for the high-level TTL-aware API** — it provides TTL, supports all record types, respects the hosts file, and supports async operation. No need for our own stub resolver on Windows.
+2. **Custom DNS server support maps naturally** — `DnsResolverOptions.Servers` can map to `pDnsServerList` or `pCustomServers`.
+3. **The TTL is "remaining" TTL, not "original"** — this is actually what consumers want (how long until this record expires), so it maps well to our `ExpiresAt` pattern.
+4. **`DNS_QUERY_REQUEST3` (v3) adds port/protocol control** but requires Win11 Build 22000+. We may need a fallback to v1 on older Windows versions.
+5. **The low-level message APIs (reader/writer) are still needed** for Linux/macOS and for advanced scenarios on all platforms, but on Windows we don't need them for the common high-level path.
+6. **Server failover is handled by `DnsQueryEx` on Windows** — the API automatically tries the next server in the list after ~1s. Retry count and per-server timeout are not configurable through public API, which constrains how much control we can offer on Windows through `DnsResolverOptions`.

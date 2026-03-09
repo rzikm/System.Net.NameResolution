@@ -31,151 +31,40 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     }
 
     /// <summary>
-    /// Resolves hostname to addresses with TTL information.
-    /// AddressFamily.Unspecified queries both A and AAAA.
+    /// Resolves DNS records of type <typeparamref name="T"/> for the given name.
+    /// Each record type provides its own resolution strategy via <see cref="IDnsRecord{T}"/>.
     /// </summary>
-    public async Task<DnsResult<DnsResolvedAddress>> ResolveAddressesAsync(
-        string hostName,
-        AddressFamily addressFamily = AddressFamily.Unspecified,
+    public Task<DnsResult<T>> ResolveAsync<T>(
+        string name,
         CancellationToken cancellationToken = default)
+        where T : IDnsRecord<T>
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentException.ThrowIfNullOrEmpty(hostName);
+        ArgumentException.ThrowIfNullOrEmpty(name);
 
-        List<DnsResolvedAddress> results = new();
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        DnsResponseCode worstResponseCode = DnsResponseCode.NoError;
-        DateTimeOffset? negativeCacheExpires = null;
-
-        if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetwork)
-        {
-            (DnsResponseCode rcode, DateTimeOffset? negExpires) =
-                await QueryAndCollectAddressesAsync(hostName, DnsRecordType.A, now, results, cancellationToken);
-            if (rcode != DnsResponseCode.NoError)
-            {
-                worstResponseCode = rcode;
-                negativeCacheExpires = negExpires;
-            }
-        }
-
-        if (addressFamily is AddressFamily.Unspecified or AddressFamily.InterNetworkV6)
-        {
-            (DnsResponseCode rcode, DateTimeOffset? negExpires) =
-                await QueryAndCollectAddressesAsync(hostName, DnsRecordType.AAAA, now, results, cancellationToken);
-            if (rcode != DnsResponseCode.NoError && worstResponseCode == DnsResponseCode.NoError)
-            {
-                worstResponseCode = rcode;
-                negativeCacheExpires = negExpires;
-            }
-        }
-
-        if (results.Count > 0)
-        {
-            return new DnsResult<DnsResolvedAddress>(DnsResponseCode.NoError, results.ToArray());
-        }
-
-        return new DnsResult<DnsResolvedAddress>(worstResponseCode, [], negativeCacheExpires);
+        return T.ResolveAsync(name, SendQueryAsync, cancellationToken);
     }
 
-    private async Task<(DnsResponseCode, DateTimeOffset?)> QueryAndCollectAddressesAsync(
-        string hostName, DnsRecordType type, DateTimeOffset now,
-        List<DnsResolvedAddress> results, CancellationToken ct)
+    /// <summary>
+    /// Resolves hostname to addresses with TTL information.
+    /// Convenience wrapper for <see cref="ResolveAsync{T}"/> with <see cref="DnsAddress"/>.
+    /// </summary>
+    public Task<DnsResult<DnsAddress>> ResolveAddressesAsync(
+        string hostName,
+        CancellationToken cancellationToken = default)
     {
-        (byte[] responseBuf, int responseLength) = await SendQueryAsync(hostName, type, ct);
-        try
-        {
-            return CollectAddresses(responseBuf.AsSpan(0, responseLength), now, results);
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(responseBuf);
-        }
+        return ResolveAsync<DnsAddress>(hostName, cancellationToken);
     }
 
     /// <summary>
     /// Resolves SRV records for service discovery.
+    /// Convenience wrapper for <see cref="ResolveAsync{T}"/> with <see cref="DnsSrvRecord"/>.
     /// </summary>
-    public async Task<DnsResult<DnsResolvedService>> ResolveServiceAsync(
+    public Task<DnsResult<DnsSrvRecord>> ResolveServiceAsync(
         string serviceName,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentException.ThrowIfNullOrEmpty(serviceName);
-
-        (byte[] responseBuf, int responseLength) = await SendQueryAsync(serviceName, DnsRecordType.SRV, cancellationToken);
-        try
-        {
-            ReadOnlySpan<byte> responseSpan = responseBuf.AsSpan(0, responseLength);
-            DnsMessageReader reader = CreateReader(responseSpan);
-            DateTimeOffset now = DateTimeOffset.UtcNow;
-
-            if (reader.Header.ResponseCode != DnsResponseCode.NoError)
-            {
-                DateTimeOffset? negExpires = ExtractNegativeCacheTtl(responseSpan, now);
-                return new DnsResult<DnsResolvedService>(reader.Header.ResponseCode, [], negExpires);
-            }
-
-            SkipQuestions(ref reader);
-
-            List<DnsResolvedService> services = new();
-            Dictionary<string, List<DnsResolvedAddress>> additionalAddresses = new(StringComparer.OrdinalIgnoreCase);
-
-            // Read answer records (SRV)
-            List<(string Target, ushort Port, ushort Priority, ushort Weight, DateTimeOffset ExpiresAt)> srvRecords = new();
-
-            for (int i = 0; i < reader.Header.AnswerCount; i++)
-            {
-                DnsRecord record = ReadRecord(ref reader);
-                if (record.TryParseSrvRecord(out DnsSrvRecordData srv))
-                {
-                    srvRecords.Add((srv.Target.ToString(), srv.Port, srv.Priority, srv.Weight,
-                        now + TimeSpan.FromSeconds(record.TimeToLive)));
-                }
-            }
-
-            SkipRecords(ref reader, reader.Header.AuthorityCount);
-
-            // Read additional section for addresses
-            for (int i = 0; i < reader.Header.AdditionalCount; i++)
-            {
-                DnsRecord record = ReadRecord(ref reader);
-
-                IPAddress? address = null;
-                if (record.TryParseARecord(out DnsARecordData a))
-                {
-                    address = a.ToIPAddress();
-                }
-                else if (record.TryParseAAAARecord(out DnsAAAARecordData aaaa))
-                {
-                    address = aaaa.ToIPAddress();
-                }
-
-                if (address != null)
-                {
-                    string recordName = record.Name.ToString();
-                    if (!additionalAddresses.TryGetValue(recordName, out List<DnsResolvedAddress>? list))
-                    {
-                        list = new List<DnsResolvedAddress>();
-                        additionalAddresses[recordName] = list;
-                    }
-                    list.Add(new DnsResolvedAddress(address, now + TimeSpan.FromSeconds(record.TimeToLive)));
-                }
-            }
-
-            // Combine SRV records with their additional addresses
-            foreach ((string target, ushort port, ushort priority, ushort weight, DateTimeOffset expiresAt) in srvRecords)
-            {
-                additionalAddresses.TryGetValue(target, out List<DnsResolvedAddress>? addrs);
-                services.Add(new DnsResolvedService(target, port, priority, weight, expiresAt,
-                    addrs?.ToArray()));
-            }
-
-            return new DnsResult<DnsResolvedService>(DnsResponseCode.NoError, services.ToArray());
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(responseBuf);
-        }
+        return ResolveAsync<DnsSrvRecord>(serviceName, cancellationToken);
     }
 
     /// <summary>
@@ -488,44 +377,11 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         return [new IPEndPoint(IPAddress.Loopback, 53)];
     }
 
-    private static (DnsResponseCode, DateTimeOffset?) CollectAddresses(
-        ReadOnlySpan<byte> response, DateTimeOffset now, List<DnsResolvedAddress> results)
-    {
-        DnsMessageReader reader = CreateReader(response);
-        DnsResponseCode rcode = reader.Header.ResponseCode;
-
-        if (rcode != DnsResponseCode.NoError)
-        {
-            DateTimeOffset? negExpires = ExtractNegativeCacheTtl(response, now);
-            return (rcode, negExpires);
-        }
-
-        SkipQuestions(ref reader);
-
-        for (int i = 0; i < reader.Header.AnswerCount; i++)
-        {
-            DnsRecord record = ReadRecord(ref reader);
-
-            if (record.TryParseARecord(out DnsARecordData a))
-            {
-                results.Add(new DnsResolvedAddress(
-                    a.ToIPAddress(), now + TimeSpan.FromSeconds(record.TimeToLive)));
-            }
-            else if (record.TryParseAAAARecord(out DnsAAAARecordData aaaa))
-            {
-                results.Add(new DnsResolvedAddress(
-                    aaaa.ToIPAddress(), now + TimeSpan.FromSeconds(record.TimeToLive)));
-            }
-        }
-
-        return (DnsResponseCode.NoError, null);
-    }
-
     /// <summary>
     /// Extracts the negative cache TTL from the SOA record in the authority section.
     /// Per RFC 2308, the negative cache TTL is the minimum of the SOA TTL and the SOA MINIMUM field.
     /// </summary>
-    private static DateTimeOffset? ExtractNegativeCacheTtl(ReadOnlySpan<byte> response, DateTimeOffset now)
+    internal static DateTimeOffset? ExtractNegativeCacheTtl(ReadOnlySpan<byte> response, DateTimeOffset now)
     {
         DnsMessageReader reader = CreateReader(response);
 
@@ -567,10 +423,10 @@ public class DnsResolver : IAsyncDisposable, IDisposable
     }
 
     [DoesNotReturn]
-    private static void ThrowMalformedResponse() =>
+    internal static void ThrowMalformedResponse() =>
         throw new InvalidDataException("Malformed DNS response.");
 
-    private static DnsMessageReader CreateReader(ReadOnlySpan<byte> response)
+    internal static DnsMessageReader CreateReader(ReadOnlySpan<byte> response)
     {
         if (!DnsMessageReader.TryCreate(response, out DnsMessageReader reader))
         {
@@ -579,7 +435,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         return reader;
     }
 
-    private static void SkipQuestions(ref DnsMessageReader reader)
+    internal static void SkipQuestions(ref DnsMessageReader reader)
     {
         for (int i = 0; i < reader.Header.QuestionCount; i++)
         {
@@ -590,7 +446,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         }
     }
 
-    private static DnsRecord ReadRecord(ref DnsMessageReader reader)
+    internal static DnsRecord ReadRecord(ref DnsMessageReader reader)
     {
         if (!reader.TryReadRecord(out DnsRecord record))
         {
@@ -599,7 +455,7 @@ public class DnsResolver : IAsyncDisposable, IDisposable
         return record;
     }
 
-    private static void SkipRecords(ref DnsMessageReader reader, int count)
+    internal static void SkipRecords(ref DnsMessageReader reader, int count)
     {
         for (int i = 0; i < count; i++)
         {
