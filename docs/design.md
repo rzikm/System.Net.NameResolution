@@ -9,7 +9,6 @@ Another motivation exposing more granular access to DNS records, currently, ther
 ## Goals
 
 - **Expose TTL information** from DNS responses through high-level resolution APIs, enabling callers to make informed caching and connection lifetime decisions.
-- **Minimize allocations** in the low-level APIs by using struct-based reader/writer types that operate over caller-provided buffers.
 - **Support cross-platform operation**, accounting for differences in platform capabilities:
   - On **Windows**, OS-level APIs can return TTL information directly.
   - On **Linux/macOS**, the high-level TTL-aware API will be backed by a built-in stub resolver that communicates with the configured DNS server (from `/etc/resolv.conf`).
@@ -32,52 +31,61 @@ Another motivation exposing more granular access to DNS records, currently, ther
 - **mDNS / LLMNR** — multicast DNS and link-local multicast name resolution are out of scope.
 - **Full `nsswitch.conf` implementation** — the resolver will handle hosts file lookup and DNS, but will not implement the full NSS plugin pipeline.
 
-## High-Level API: DnsResolver
+## Assumptions
 
-### Overview
+- **Systemd resolver** - Linux systems with systemd-resolver run a stub listener at 127.0.0.53. Querries targeting this endpoint receive the same handling as gethostaddress and other glibc APIs including hostfiles, caching, DNSSEC, etc.
 
-The high-level API provides an async, TTL-aware DNS resolver built around a single generic entry point. It handles transport (UDP with TCP fallback), retry logic, server failover, and hosts file lookup internally. On Windows, it can delegate to `DnsQueryEx` for the common path. On Linux/macOS, it uses the low-level message primitives to communicate with the configured DNS server.
+  - systemd-resolved is not universal, some distros don't have it at all, some distros don't enable it by default.
+  - example distros without systemd-resolved: Alpine Linux, Gentoo
+  - example distros with systemd-resolved disabled are Debian, RHEL, CentOS, SUSE, Oracle.
+  - Servers generally don't use resolved and query upstream DNS server directly
 
-### Generic `Dns.ResolveAsync<T>` Design
+## High-Level API: Static DNS APIs
 
-The core idea is a single generic entry point where the type parameter `T` determines which DNS queries are sent and how the results are parsed:
+The high-level API provides an async, TTL-aware DNS resolution using the OS-configured DNS server.
 
-```csharp
-// Static API (preferred entry point)
-public static class Dns
-{
-    static Task<DnsResult<T>> ResolveAsync<T>(string name, CancellationToken ct = default)
-        where T : IDnsRecord<T>;
-}
-```
-
-This aligns with the existing `System.Net.Dns` class pattern and simplifies one-off queries without requiring callers to manage a resolver instance. It could also enable replacing the implementation of existing `Dns.GetHostAddresses` with the new resolver, addressing limitations (no TTL, synchronous-only on Linux).
-
-Each result type `T` implements `IDnsRecord<T>`, which provides a **static abstract resolution strategy**. Rather than mapping `T` to a single DNS record type, each type owns its full resolution logic — it receives a query-sending delegate, sends whatever queries it needs, parses the responses, and returns the result. This avoids any `typeof(T)` branching in the resolver itself and naturally supports complex resolution patterns (e.g., `DnsAddressRecord` querying both A and AAAA, `DnsSrvRecord` collecting additional-section addresses).
+### Preferred design: separate methods for each type
 
 ```csharp
-namespace System.Net;
-
-// Delegate for sending a DNS query and receiving the raw response.
-// Returns a rented buffer and its valid length. The caller must return the buffer to the pool.
-public delegate Task<(byte[] Buffer, int Length)> DnsSendQueryAsync(
-    string name, DnsRecordType type, CancellationToken cancellationToken);
-
-public interface IDnsRecord<TSelf> where TSelf : IDnsRecord<TSelf>
+static class Dns
 {
-    // Each type provides its own resolution strategy.
-    // The delegate handles transport (UDP/TCP, retries, server failover).
-    // The type handles query composition and response parsing.
-    //
-    // note: This member is *not* public
-    static abstract Task<DnsResult<TSelf>> ResolveAsync(
-        string name,
-        DnsSendQueryAsync sendQueryAsync,
-        CancellationToken cancellationToken);
+    // There are no conflicts with existing Dns methods. Most existing methods start with GetHost*
+
+    // existing (obsolete) method
+    // public static System.Net.IPHostEntry Resolve(string hostName);
+
+    // Queries both A and AAAA, returns all addresses.
+    public static Task<DnsResult<DnsAddressRecord>> ResolveAddressesAsync(
+        string hostName, CancellationToken cancellationToken = default);
 
     // Overload to allow specifying only A or only AAAA records
     public static Task<DnsResult<DnsAddressRecord>> ResolveAddressesAsync(
         string hostName, AddressFamily addressFamily, CancellationToken cancellationToken = default);
+
+    // SRV lookup. Collects additional-section A/AAAA records for each target.
+    public static Task<DnsResult<DnsSrvRecord>> ResolveServiceAsync(
+        string serviceName, CancellationToken cancellationToken = default);
+
+    // MX lookup.
+    public static Task<DnsResult<DnsMxRecord>> ResolveMxAsync(
+        string name, CancellationToken cancellationToken = default);
+
+    // TXT lookup. Each record's Strings are the character-strings decoded as UTF-8.
+    public static Task<DnsResult<DnsTxtResult>> ResolveTxtAsync(
+        string name, CancellationToken cancellationToken = default);
+
+    // CNAME lookup.
+    public static Task<DnsResult<DnsCNameResult>> ResolveCNameAsync(
+        string name, CancellationToken cancellationToken = default);
+
+    // PTR lookup (reverse DNS).
+    // alternative: accept IPAddress instead of name
+    public static Task<DnsResult<DnsPtrResult>> ResolvePtrAsync(
+        string name, CancellationToken cancellationToken = default);
+
+    // NS lookup.
+    public static Task<DnsResult<DnsNsResult>> ResolveNsAsync(
+        string name, CancellationToken cancellationToken = default);
 }
 ```
 
@@ -85,26 +93,29 @@ Usage:
 
 ```csharp
 // Simple address lookup (queries both A and AAAA)
-DnsResult<DnsAddressRecord> addresses = await Dns.ResolveAsync<DnsAddressRecord>("example.com");
+DnsResult<DnsAddressRecord> addresses = await Dns.ResolveAddressesAsync("example.com");
 
 // SRV lookup for service discovery (collects additional-section addresses)
-DnsResult<DnsSrvRecord> services = await Dns.ResolveAsync<DnsSrvRecord>("_http._tcp.example.com");
+DnsResult<DnsSrvRecord> services = await Dns.ResolveServiceAsync("_http._tcp.example.com");
 
 // MX lookup
-DnsResult<DnsMxRecord> mailServers = await Dns.ResolveAsync<DnsMxRecord>("example.com");
+DnsResult<DnsMxRecord> mailServers = await Dns.ResolveMxAsync("example.com");
 
 // TXT lookup
-DnsResult<DnsTxtResult> txtRecords = await Dns.ResolveAsync<DnsTxtResult>("example.com");
+DnsResult<DnsTxtResult> txtRecords = await Dns.ResolveTxtAsync("example.com");
 
 // PTR lookup (reverse DNS)
-DnsResult<DnsPtrResult> ptr = await Dns.ResolveAsync<DnsPtrResult>("1.0.0.10.in-addr.arpa");
+DnsResult<DnsPtrResult> ptr = await Dns.ResolvePtrAsync("1.0.0.10.in-addr.arpa");
+// DnsResult<DnsPtrResult> ptr = await Dns.ResolvePtrAsync(IPAddress.Parse("1.0.0.10"));
 
 // CNAME lookup
-DnsResult<DnsCNameResult> cname = await Dns.ResolveAsync<DnsCNameResult>("www.example.com");
+DnsResult<DnsCNameResult> cname = await Dns.ResolveCNameAsync("www.example.com");
 
 // NS lookup
-DnsResult<DnsNsResult> ns = await Dns.ResolveAsync<DnsNsResult>("example.com");
+DnsResult<DnsNsResult> ns = await Dns.ResolveNsAsync("example.com");
 ```
+
+There are more than 40 DNS record types, the list above is a selection of the most commonly used ones (?). The ability to read *any* existing record type as raw bytes is part of the low-level APIs later in the proposal.
 
 ### Result Wrapper
 
@@ -114,15 +125,21 @@ High-level methods return `DnsResult<T>`, a generic wrapper that carries the DNS
 - **NODATA**: `ResponseCode == NoError`, `Records` is empty (name exists but has no records of the requested type)
 - **NXDOMAIN**: `ResponseCode == NameError`, `Records` is empty (name does not exist)
 
-For negative responses (NXDOMAIN/NODATA), `NegativeCacheExpiresAt` is populated from the SOA minimum TTL in the authority section (per RFC 2308 §5), enabling callers to cache negative results.
-
 ```csharp
 namespace System.Net;
 
 public readonly struct DnsResult<T>
 {
     public DnsResponseCode ResponseCode { get; }
-    public T[] Records { get; }
+    public ReadOnlyList<T> Records { get; }
+
+    //
+    // For negative responses (NXDOMAIN/NODATA), `NegativeCacheExpiresAt` is
+    // populated from the SOA minimum TTL in the authority section (per RFC 2308
+    // §5), enabling callers to cache negative results.
+    //
+    // Alternative name: NegativeCacheExpiration
+    // Alternative: public int? NegativeCacheTtl { get; }
     public DateTimeOffset? NegativeCacheExpiresAt { get; }
 }
 ```
@@ -138,6 +155,9 @@ namespace System.Net;
 public readonly struct DnsAddressRecord : IDnsRecord<DnsAddressRecord>
 {
     public IPAddress Address { get; }
+
+    // Alternative name: Expiration
+    // Alternative: public int Ttl { get; } (and same for all types below)
     public DateTimeOffset ExpiresAt { get; }
 }
 
@@ -184,53 +204,74 @@ public readonly struct DnsNsResult : IDnsRecord<DnsNsResult>
 }
 ```
 
-### Alternative Design: separate methods for each type
+### Alternative: Generic `Dns.ResolveAsync<T>` Design
+
+The core idea is a single generic entry point where the type parameter `T` determines which DNS queries are sent and how the results are parsed:
 
 ```csharp
-
-static class Dns
+// Static API (preferred entry point)
+public static class Dns
 {
-    // There are no conflicts with existing Dns methods. Most existing methods start with GetHost*
-
-    // existing (obsolete) method
-    // public static System.Net.IPHostEntry Resolve(string hostName);
-
-    // Queries both A and AAAA, returns all addresses.
-    public static Task<DnsResult<DnsAddressRecord>> ResolveAddressesAsync(
-        string hostName, CancellationToken cancellationToken = default);
+    static Task<DnsResult<T>> ResolveAsync<T>(string name, CancellationToken ct = default)
+        where T : IDnsRecord<T>;
 
     // Overload to allow specifying only A or only AAAA records
     public static Task<DnsResult<DnsAddressRecord>> ResolveAddressesAsync(
         string hostName, AddressFamily addressFamily, CancellationToken cancellationToken = default);
-
-    // SRV lookup. Collects additional-section A/AAAA records for each target.
-    public static Task<DnsResult<DnsSrvRecord>> ResolveServiceAsync(
-        string serviceName, CancellationToken cancellationToken = default);
-
-    // MX lookup.
-    public static Task<DnsResult<DnsMxRecord>> ResolveMxAsync(
-        string name, CancellationToken cancellationToken = default);
-
-    // TXT lookup. Each record's Strings are the character-strings decoded as UTF-8.
-    public static Task<DnsResult<DnsTxtResult>> ResolveTxtAsync(
-        string name, CancellationToken cancellationToken = default);
-
-    // CNAME lookup.
-    public static Task<DnsResult<DnsCNameResult>> ResolveCNameAsync(
-        string name, CancellationToken cancellationToken = default);
-
-    // PTR lookup (reverse DNS).
-    public static Task<DnsResult<DnsPtrResult>> ResolvePtrAsync(
-        string name, CancellationToken cancellationToken = default);
-
-    // NS lookup.
-    public static Task<DnsResult<DnsNsResult>> ResolveNsAsync(
-        string name, CancellationToken cancellationToken = default);
 }
-
 ```
 
-### Alternative Design: Instance-Based API
+Each result type `T` implements `IDnsRecord<T>`, which provides a **static abstract resolution strategy**. Rather than mapping `T` to a single DNS record type, each type owns its full parsing logic — it receives a query-sending delegate, sends whatever queries it needs, parses the responses, and returns the result.
+
+```csharp
+namespace System.Net;
+
+// Delegate for sending a DNS query and receiving the raw response.
+// Returns a rented buffer and its valid length. The caller must return the buffer to the pool.
+public delegate Task<(byte[] Buffer, int Length)> DnsSendQueryAsync(
+    string name, DnsRecordType type, CancellationToken cancellationToken);
+
+public interface IDnsRecord<TSelf> where TSelf : IDnsRecord<TSelf>
+{
+    // Each type provides its own resolution strategy.
+    // The delegate handles transport (UDP/TCP, retries, server failover).
+    // The type handles query composition and response parsing.
+    //
+    // note: implementations will use explicit interface implementation, so
+    //       this member will not be publicly visible as e.g. DnsAddressRecord.ResolveAsync(...)
+    static abstract Task<DnsResult<TSelf>> ResolveAsync(
+        string name,
+        DnsSendQueryAsync sendQueryAsync,
+        CancellationToken cancellationToken);
+}
+```
+
+Usage:
+
+```csharp
+// Simple address lookup (queries both A and AAAA)
+DnsResult<DnsAddressRecord> addresses = await Dns.ResolveAsync<DnsAddressRecord>("example.com");
+
+// SRV lookup for service discovery (collects additional-section addresses)
+DnsResult<DnsSrvRecord> services = await Dns.ResolveAsync<DnsSrvRecord>("_http._tcp.example.com");
+
+// MX lookup
+DnsResult<DnsMxRecord> mailServers = await Dns.ResolveAsync<DnsMxRecord>("example.com");
+
+// TXT lookup
+DnsResult<DnsTxtResult> txtRecords = await Dns.ResolveAsync<DnsTxtResult>("example.com");
+
+// PTR lookup (reverse DNS)
+DnsResult<DnsPtrResult> ptr = await Dns.ResolveAsync<DnsPtrResult>("1.0.0.10.in-addr.arpa");
+
+// CNAME lookup
+DnsResult<DnsCNameResult> cname = await Dns.ResolveAsync<DnsCNameResult>("www.example.com");
+
+// NS lookup
+DnsResult<DnsNsResult> ns = await Dns.ResolveAsync<DnsNsResult>("example.com");
+```
+
+## Configurable API: Instance-Based DnsResolver
 
 For scenarios requiring custom configuration (specific DNS servers, timeout tuning, dependency injection), an instance-based `DnsResolver` can be also provided:
 
@@ -261,17 +302,31 @@ public class DnsResolverOptions
     public IList<IPEndPoint> Servers { get; set; } = new List<IPEndPoint>();
     public int MaxRetries { get; set; } = 2;
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(3);
-    public bool UseHostsFile { get; set; } = true;
+    // public bool UseHostsFile { get; set; } = true;
+
+    // Possibly more config options coming in the future
 }
 ```
 
 ### Open Questions
 
-1. **`IDnsRecord<T>` extensibility**: The interface is public, so third-party types could implement it. However, the `DnsSendQueryAsync` delegate exposes the internal query mechanism (rented buffers). Should this be public or internal? If public, it enables user-defined record types. If internal, the set of supported types is sealed.
+1. **Search domains**: Should `DnsResolverOptions` expose a `SearchDomains` override, or should the resolver always read from system config? Should `QueryAsync` also apply search domain expansion, or only `ResolveAsync<T>`?
 
-2. **Search domains**: Should `DnsResolverOptions` expose a `SearchDomains` override, or should the resolver always read from system config? Should `QueryAsync` also apply search domain expansion, or only `ResolveAsync<T>`?
+2. **Failover and timeout configuration**: `DnsQueryEx` on Windows handles failover internally with no public API to control it, should we hardcode the behavior on Linux and remove the related options?
 
-3. **Failover and timeout configuration**: `DnsQueryEx` on Windows handles failover internally with no public API to control it. Options: expose options as best-effort hints, don't expose them, or bypass `DnsQueryEx` for full control on all platforms.
+3. **Caching**: Should we implement caching of DNS responses, or leave the cache management to the users?
+
+    - Internal cache: easier to use, more complex implementation (possibly requiring more DnsResolverOptions)
+    - No cache: simple implementation, additional complexity for users, but may be more efficient (e.g. users will cache only results for one domain name on a class field and don't need hashtable-based cache)
+    - Windows already performs caching on the API level
+    - Linux can also be configured to cache at the systemd stub-resolver level at 127.0.0.53
+    - Problem: cache invalidation on network changes? Hostfile monitoring?
+
+4. **Hostfile handling**: Windows resolver and systemd stub-resolver already handle hostfiles. Is it really necessary to support hostfiles if user wants to point the DnsResolver to a custom DNS server?
+
+5. **App-defined host-files**: Should applications be able to provide custom, hostfile-like mapping to support mocking for testing purposes?
+
+    - Microsoft.Extensions.ServiceDiscovery - supports multiple sources for service discovery, including config files, DNS A/AAAA, DNS SRV, etc. => the problem already has a solution in external packages, do we need an in-box one?
 
 ## Low-Level API: DNS Message Primitives (Draft)
 
