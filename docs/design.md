@@ -858,6 +858,159 @@ for (int i = 0; i < reader.Header.AnswerCount; i++)
 }
 ```
 
+## Future Work: Alternative Transports (DoT / DoH / DoQ)
+
+The initial implementation uses the classic DNS transport (UDP with TCP fallback on TC bit, RFC 1035 / 7766). Modern deployments increasingly use encrypted transports: DNS-over-TLS (DoT, RFC 7858), DNS-over-HTTPS (DoH, RFC 8484), and DNS-over-QUIC (DoQ, RFC 9250). The design accommodates them by introducing a transport abstraction.
+
+### Transport Abstraction
+
+Today the resolver's `SendQueryAsync` method takes a query (name + record type) and returns a raw response buffer. This is the natural cut point. We split it into an orchestration layer (retry, failover, UDP→TCP fallback, response validation) and a pluggable transport that only moves bytes:
+
+```csharp
+public abstract class DnsTransport : IAsyncDisposable
+{
+    // query is the fully-encoded DNS message. Returned buffer is rented from
+    // ArrayPool; the caller returns it after use.
+    public abstract Task<(byte[] Buffer, int Length)> SendQueryAsync(
+        ReadOnlyMemory<byte> query, CancellationToken cancellationToken);
+
+    public virtual ValueTask DisposeAsync() => default;
+
+    // Built-in factories
+    public static DnsTransport Udp(IPEndPoint server, TimeSpan timeout);
+    public static DnsTransport Tcp(IPEndPoint server, TimeSpan timeout);
+    public static DnsTransport Tls(IPEndPoint server, string host,
+        SslClientAuthenticationOptions? tls = null);
+    public static DnsTransport Https(Uri endpoint, HttpMessageHandler? handler = null);
+    public static DnsTransport Quic(IPEndPoint server, string host);
+}
+```
+
+`DnsResolverOptions` gains a transport hook, and `DnsResolver` becomes `IAsyncDisposable` so it can own the transport lifetime:
+
+```csharp
+public sealed class DnsResolver : IAsyncDisposable
+{
+    public DnsResolver(DnsResolverOptions options);
+    public ValueTask DisposeAsync();
+}
+
+public class DnsResolverOptions
+{
+    // Existing options...
+    public IList<IPEndPoint> Servers { get; set; } = new List<IPEndPoint>();
+
+    // New: if set, overrides the default UDP+TCP-fallback transport built from Servers.
+    // When null (default), the resolver uses classic UDP/TCP per-server.
+    // Invoked at most once, lazily on first query. The resolver owns the
+    // returned instance and disposes it in DnsResolver.DisposeAsync.
+    public Func<DnsTransport>? TransportFactory { get; set; }
+}
+```
+
+Because `IDnsRecord<T>.ResolveAsync` receives a transport-agnostic `DnsSendQueryAsync` delegate, **no record-type code changes** — DoT/DoH/DoQ are opaque to the parsing layer.
+
+### Ownership and Lifetime
+
+Ownership follows a single rule: **whoever constructs a disposable, disposes it.**
+
+- **`TransportFactory` is invoked at most once, lazily, on the first query.** Eager construction in the resolver constructor would force a TLS handshake during construction, which is not async-safe.
+- The resolver owns the transport it created via the factory and disposes it in `DnsResolver.DisposeAsync`.
+- `DnsResolver.DisposeAsync` should wait for outstanding queries to drain before disposing the transport (same contract as `HttpClient`).
+- A transport's own `DisposeAsync` must **only** dispose state it created itself. If a user's factory captures a pre-built `HttpClient` or `SslClientAuthenticationOptions` so they can be shared across resolvers, the transport wraps those without owning them (standard `HttpClient`-wrapper etiquette).
+- The process-wide static path (`Dns.ResolveAsync<T>`) uses a framework-owned default resolver with the classic UDP+TCP transport. Users who need a custom transport must construct their own `DnsResolver` and dispose it.
+- Multiple concurrent `ResolveAsync` calls on one resolver share the one transport — transport implementations must be thread-safe.
+
+### Error Taxonomy
+
+Transports signal failures by throwing one of three categories:
+
+| Category | Examples | Retriable? |
+|---|---|---|
+| `OperationCanceledException` | caller cancelled | No — propagate immediately |
+| `DnsTransportException` (new, wraps `SocketException`, `IOException`, HTTP 5xx, QUIC errors) | timeout, connection reset, transient network fault, malformed response (header unparseable) | **Yes** |
+| Fatal exceptions | `AuthenticationException` (TLS cert failure), `ArgumentException`, `ObjectDisposedException` | No — indicate config / programmer error |
+
+Anything else bubbling out of a transport is a bug in that transport.
+
+Transports MAY internally retry **once** on stale-connection signals — TCP RST after idle, HTTP/2 GOAWAY, QUIC idle timeout — because the resolver cannot distinguish "stale pooled connection" from "server is dead". This is invisible to the resolver and does not count against `MaxRetries`. Transports MUST NOT retry on timeouts; timing is the resolver's budget to manage.
+
+### Retry and Failover Rules
+
+The resolver orchestrates retry. DNS queries are idempotent, so blind retry is safe.
+
+| Signal | Resolver action |
+|---|---|
+| Per-attempt timeout | Count as retry, try next server (wrap-around), up to `MaxRetries` |
+| `DnsTransportException` | Count as retry, try next server |
+| Malformed response | Treat as transport error and retry |
+| ID / question mismatch (UDP only) | Discard and keep reading within the same timeout window (does **not** count as a retry), up to a small cap |
+| TC bit set (UDP only) | Transparent TCP fallback on the **same** server — does not count as a retry |
+| RCODE `NoError` / `NxDomain` | Return as result (NXDOMAIN is a valid negative answer, cached per SOA TTL) |
+| RCODE `ServFail` / `Refused` | Retry on next server; surface after exhausting `MaxRetries` |
+| RCODE anything else | Surface to caller |
+| `OperationCanceledException` | Propagate immediately |
+| Fatal exceptions | Propagate immediately |
+
+Notes:
+
+- **Timeout budget**: `DnsResolverOptions.Timeout` is per-attempt, enforced by the resolver via a linked CTS passed to `SendQueryAsync`. Total worst-case wait ≈ `MaxRetries × Timeout`. We either document this or add an explicit `TotalTimeout`.
+- **Transport-internal timeouts** (e.g., TLS handshake) must be ≤ the CTS deadline the transport receives; they never extend it.
+- **Connection re-establishment**: if a pooled connection is broken, the transport transparently reopens on the next query (subject to the single stale-connection retry above). TLS/QUIC authentication failures are fatal and must not trigger reconnect loops.
+- **Backoff**: no delay before the first retry; optional small fixed delay (e.g., 100 ms) between subsequent retries. No exponential — DNS deadlines are short enough. *Open question below.*
+- **Cancellation isolation**: cancelling one query on a shared transport must not affect other in-flight queries on the same connection. Transports must use a per-call CTS, not a shared one.
+- **Observability**: each retry, failover, and UDP→TCP fallback should emit an `EventSource` / `Activity` event. Out of scope for the first transport milestone, but the plumbing for it should be designed in up-front.
+
+### Per-Transport Notes
+
+| Transport | Wire format | Port | Reuses |
+|---|---|---|---|
+| UDP | bare message | 53 | — |
+| TCP | 2-byte length prefix + message | 53 | — |
+| **DoT** | identical to TCP, wrapped in `SslStream` | 853 | TCP framing |
+| **DoH** | HTTP POST with `application/dns-message` body (or GET with base64url `dns=` parameter) | 443 | — (needs `HttpClient`) |
+| **DoQ** | one message per QUIC stream, length-prefixed like TCP | 853 | TCP framing, `System.Net.Quic` |
+
+- **DoT** is the cheapest increment — wrap the existing TCP send/receive logic in `SslStream`.
+- **DoH** needs a `Uri`-based server identity rather than `IPEndPoint`, and reuses a shared `HttpClient` for HTTP/2 multiplexing.
+- **DoQ** maps naturally onto QUIC streams (one query per stream), but depends on `System.Net.Quic`.
+- For all three, there is **no TCP fallback path** — the transport carries arbitrary-size responses natively, so the orchestration layer must skip TC-bit handling when a non-UDP transport is in use.
+
+### Connection Management
+
+UDP opens a fresh socket per query — fine, since there is no handshake. DoT/DoH/DoQ must pool the underlying connection across queries; otherwise every query pays for a TLS handshake (~1 RTT) or worse. Each secure transport therefore owns state and is `IAsyncDisposable`:
+
+- **DoT**: keep TCP+TLS connection open, pipeline queries with distinct IDs per RFC 7766.
+- **DoH**: reuse `HttpClient`; HTTP/2 multiplexes concurrent queries on one connection.
+- **DoQ**: keep one QUIC connection, open a new stream per query.
+
+This is a key reason to make `DnsTransport` an instance type rather than a static helper or delegate.
+
+### Server Identity
+
+`IPEndPoint` is sufficient for UDP/TCP/DoQ (+ SNI hostname for the TLS/QUIC variants). DoH needs a `Uri`. The `DnsTransport` factory methods above absorb this asymmetry so that `DnsResolverOptions` does not need a polymorphic `DnsServer` type.
+
+### Response Validation
+
+The existing header/question-mirroring validation and ID matching remain applicable. Two adjustments:
+
+- Truncation (TC bit) handling applies only to UDP; other transports ignore it.
+- Query ID randomization is redundant over DoT/DoH/DoQ (the secure channel already provides integrity), but the ID must still round-trip so mismatched responses are rejected.
+
+### Incremental Delivery Path
+
+1. Refactor current UDP+TCP logic into `DnsTransport` subclasses behind the existing `SendQueryAsync`. Pure refactor, no API surface change.
+2. Expose `DnsTransport` as public and add `DnsResolverOptions.TransportFactory`.
+3. Ship `DnsTransport.Tls(...)` (reuses TCP framing).
+4. Ship `DnsTransport.Https(...)`.
+5. Ship `DnsTransport.Quic(...)` once `System.Net.Quic` is stable.
+
+### Open Questions (Transport)
+
+- Should `DnsResolverOptions` accept a list of transports for heterogeneous failover (e.g., DoH primary, DoT fallback), or is a single transport enough?
+- Should we detect OS-level encrypted DNS (Windows 11 DoH via `DnsQueryEx`, systemd-resolved DoT) and prefer it, or always use our own stack when configured?
+- Where do certificate validation callbacks / pinning live — on the transport factory, or in a shared `DnsResolverOptions.SslOptions`?
+
 ## Future Work: EDNS0 (OPT Record) Support
 
 EDNS0 (RFC 6891) extends DNS via a pseudo-record (OPT, type 41) placed in the additional section. It is practically required for modern DNS usage — without it, UDP responses are capped at 512 bytes, causing unnecessary TCP fallback. Support can be added incrementally on top of the current design:
